@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Zero dependencies — no install step. These suites need neither Codex nor network:
+      # offline unit checks + the viewer robustness suite (renders every run shape in a fake DOM).
+      - name: Offline unit checks
+        run: node runner/test/offline.js
+      - name: Run-viewer robustness (all shapes)
+        run: node runner/test/view-run.test.js

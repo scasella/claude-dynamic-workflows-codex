@@ -1,0 +1,26 @@
+{
+  "name": "claude-dynamic-workflows-codex",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run Claude Code's dynamic-workflow orchestration on a local Codex (GPT) backend, plus an interactive run viewer.",
+  "license": "MIT",
+  "author": "Stephen Casella",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scasella/claude-dynamic-workflows-codex.git"
+  },
+  "homepage": "https://github.com/scasella/claude-dynamic-workflows-codex#readme",
+  "bugs": "https://github.com/scasella/claude-dynamic-workflows-codex/issues",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node runner/test/offline.js && node runner/test/view-run.test.js",
+    "doctor": "node runner/test/handshake.js",
+    "demo": "node runner/bin/view-run.js examples/demo --open",
+    "view": "node runner/bin/view-run.js",
+    "run-workflow": "node runner/bin/run-workflow.js"
+  },
+  "keywords": [
+    "claude-code", "claude", "codex", "openai", "gpt", "agents", "workflow",
+    "orchestration", "dynamic-workflows", "agent-skills", "visualization", "dag"
+  ]
+}

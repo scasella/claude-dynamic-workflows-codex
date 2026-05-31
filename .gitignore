@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+.env
+.env.*
+*.run.html
+
+# Runtime resume journals — except the bundled demo run (kept for the viewer demo)
+.workflow-journal/
+!examples/demo/.workflow-journal/
+!examples/demo/.workflow-journal/**

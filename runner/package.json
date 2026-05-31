@@ -1,0 +1,17 @@
+{
+  "name": "codex-workflows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Claude Code dynamic-workflow scripts against a local Codex App Server instead of Claude subagents. The workflow DSL (agent/parallel/pipeline/phase/log/budget/args/workflow) is preserved verbatim; only agent() is rebound to a Codex thread+turn.",
+  "bin": {
+    "run-workflow": "bin/run-workflow.js"
+  },
+  "scripts": {
+    "handshake": "node test/handshake.js",
+    "example": "node bin/run-workflow.js examples/hello.workflow.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
