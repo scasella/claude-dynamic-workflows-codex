@@ -139,7 +139,9 @@ The viewer has two layouts (toggle top-right) and works for any run shape:
 
 - **◇ Map** — the execution map. Opens at a readable 100%, centered; **Fit** (`F`)
   frames the whole graph, scroll zooms toward the cursor, drag pans.
-- **☰ Tree** — a `Run → Phase → Agent` sidebar + detail pane.
+- **☰ Tree** — a `Run → Phase → Agent` sidebar + detail pane:
+
+![Tree view](docs/tree.png)
 
 Both render results generically (arrays-of-objects → tables, `palette` → color
 swatches, `severity`/`effort` → badges, 1–10 scores → pills) and handle flat runs,
