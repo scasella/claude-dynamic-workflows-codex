@@ -181,6 +181,15 @@ DSL + authoring patterns are in [`references/authoring.md`](references/authoring
   against `codex` **0.135.0**; method names/shapes are stable, but you can regenerate
   bindings for your version with `codex app-server generate-json-schema --out DIR`.
 
+## Safety
+
+Workflow agents run with `approvalPolicy: "never"` inside a Codex sandbox (default
+`sandbox: workspace-write`) — like any autonomous agent run, they read, write, and
+execute shell commands **without prompting**. Run untrusted or exploratory tasks
+with `--sandbox read-only`, and read a workflow script before you run it. The
+workflow *script itself* is isolated (no filesystem/network/process access) — only
+the agents act.
+
 ## Limitations (honest)
 
 - This is a **standalone re-host**, not the in-Claude-Code experience: no in-session

@@ -7,9 +7,10 @@
   "bin": {
     "run-workflow": "bin/run-workflow.js"
   },
+  "license": "MIT",
   "scripts": {
     "handshake": "node test/handshake.js",
-    "example": "node bin/run-workflow.js examples/hello.workflow.js"
+    "example": "node bin/run-workflow.js ../examples/hello.workflow.js --frontier"
   },
   "engines": {
     "node": ">=18"
