@@ -26,6 +26,8 @@ function parseArgs(argv) {
     frontier: false,
     sandbox: null,
     effort: null,
+    autoEffort: false,
+    pinEffort: null,
     retries: null,
     journal: undefined,
     resume: false,
@@ -44,6 +46,8 @@ function parseArgs(argv) {
     else if (a === "--frontier") out.frontier = true;
     else if (a === "--sandbox") out.sandbox = rest[++i];
     else if (a === "--effort") out.effort = rest[++i];
+    else if (a === "--auto-effort") out.autoEffort = true;
+    else if (a === "--pin-effort") out.pinEffort = rest[++i];
     else if (a === "--retries") out.retries = Number(rest[++i]);
     else if (a === "--journal") out.journal = rest[++i];
     else if (a === "--resume") out.resume = true;
@@ -61,13 +65,18 @@ if (opts.help || !opts.script) {
   console.error(
     "usage: run-workflow <script.js> [--args JSON] [--args-file path]\n" +
       "  [--budget N] [--model M] [--frontier | --pin-model M]\n" +
-      "  [--effort none|minimal|low|medium|high|xhigh]\n" +
+      "  [--effort none|minimal|low|medium|high|xhigh] [--auto-effort | --pin-effort E]\n" +
       "  [--sandbox read-only|workspace-write|danger-full-access] [--retries N]\n" +
       "  [--resume] [--journal PATH] [--fresh] [--no-journal]\n" +
       "\n" +
-      "  --frontier     pin ALL agents to the latest frontier model (auto-detected),\n" +
-      "                 overriding any per-call model in the script\n" +
-      "  --pin-model M  pin ALL agents to model M, overriding any per-call model",
+      "  --frontier      pin ALL agents to the latest frontier model (auto-detected),\n" +
+      "                  overriding any per-call model in the script\n" +
+      "  --pin-model M   pin ALL agents to model M, overriding any per-call model\n" +
+      "  --auto-effort   scale thinking effort to each layer's parallel width:\n" +
+      "                  1 agent->xhigh, 2+ agents->high (floor). Critical single-agent\n" +
+      "                  gates (consolidate/judge/report) get maximum reasoning.\n" +
+      "                  Overridden by a per-call effort; overrides --effort.\n" +
+      "  --pin-effort E  force ALL agents to effort E, overriding per-call effort",
   );
   process.exit(opts.help ? 0 : 1);
 }
@@ -79,6 +88,23 @@ const defaults = {};
 if (opts.sandbox) defaults.sandbox = opts.sandbox;
 if (opts.effort) defaults.effort = opts.effort;
 if (opts.retries != null && !Number.isNaN(opts.retries)) defaults.retries = opts.retries;
+
+// Thinking-effort policy. `--pin-effort` (authoritative) and `--auto-effort`
+// (layer-width policy) are plumbed into the runtime; `--effort` stays a flat
+// fallback. Validate effort spellings up front so a typo fails fast.
+const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+for (const [flag, val] of [["--effort", opts.effort], ["--pin-effort", opts.pinEffort]]) {
+  if (val && !EFFORTS.has(val)) {
+    console.error(`${flag}: unknown effort '${val}' (expected ${[...EFFORTS].join("|")})`);
+    process.exit(1);
+  }
+}
+const pinnedEffort = opts.pinEffort ?? null;
+if (pinnedEffort) console.error(`⊙ pinning all agents to effort: ${pinnedEffort}`);
+else if (opts.autoEffort) {
+  console.error("⊙ auto-effort: scaling by layer width (1→xhigh, 2+→high)");
+  if (opts.effort) console.error("  note: --auto-effort governs effort; --effort is ignored");
+}
 
 // `pinnedModel` (from --frontier or --pin-model) is authoritative: every agent
 // uses it, overriding any per-call `model` a script sets. --frontier auto-detects
@@ -125,6 +151,8 @@ try {
     defaults,
     defaultModel,
     pinnedModel,
+    autoEffort: opts.autoEffort,
+    pinnedEffort,
     onPhase,
     onLog,
     journal,

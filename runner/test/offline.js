@@ -8,6 +8,7 @@ import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractMeta, runWorkflowSource } from "../src/runWorkflow.js";
+import { effortForLayerWidth } from "../src/runtime.js";
 import { isGitRepo, createWorktree } from "../src/worktree.js";
 import { identityHash, Journal } from "../src/journal.js";
 import { resolveModel, pickFrontier } from "../src/modelMap.js";
@@ -202,6 +203,66 @@ const exec = promisify(execFile);
     "skips hidden",
   );
   assert.equal(pickFrontier([]), undefined, "empty → undefined");
+}
+
+// 12) auto-effort: layer width drives thinking effort. Exercises the vm path and
+//     AsyncLocalStorage propagation through parallel()/pipeline() thunks. The
+//     `runAgent` seam echoes the effort the runtime resolved for each agent.
+{
+  const echo = async (_prompt, o) => o.effort ?? "(none)";
+  const src = [
+    'export const meta = { name: "ae" };',
+    "const wide = await parallel(Array.from({ length: 8 }, (_, i) => () => agent('w' + i)));",
+    "const small = await parallel([() => agent('a'), () => agent('b'), () => agent('c')]);",
+    "const seven = await parallel(Array.from({ length: 7 }, (_, i) => () => agent('s' + i)));",
+    "const solo = await agent('solo');",
+    "const piped = await pipeline([1, 2, 3, 4, 5, 6, 7, 8, 9], (x) => agent('p' + x));",
+    "return { wide, small, seven, solo, piped };",
+  ].join("\n");
+  const r = await runWorkflowSource(src, { autoEffort: true, runAgent: echo });
+  assert.deepEqual(r.wide, Array(8).fill("high"), "width 8 -> high (floor)");
+  assert.deepEqual(r.small, ["high", "high", "high"], "width 3 -> high");
+  assert.deepEqual(r.seven, Array(7).fill("high"), "width 7 -> high");
+  assert.equal(r.solo, "xhigh", "lone agent (width 1) -> xhigh");
+  assert.deepEqual(r.piped, Array(9).fill("high"), "pipeline width 9 -> high (floor)");
+}
+
+// 13) effort precedence: pin > per-call > auto > --effort flag > omitted.
+{
+  const echo = async (_prompt, o) => o.effort ?? "(none)";
+  const r1 = await runWorkflowSource(
+    'export const meta = { name: "p1" }; return await agent("x", { effort: "low" });',
+    { autoEffort: true, runAgent: echo },
+  );
+  assert.equal(r1, "low", "explicit per-call effort overrides the auto policy");
+
+  const r2 = await runWorkflowSource(
+    'export const meta = { name: "p2" }; return await agent("x", { effort: "low" });',
+    { autoEffort: true, pinnedEffort: "xhigh", runAgent: echo },
+  );
+  assert.equal(r2, "xhigh", "--pin-effort overrides per-call and auto");
+
+  const r3 = await runWorkflowSource(
+    'export const meta = { name: "p3" }; return await agent("x");',
+    { defaults: { effort: "medium" }, runAgent: echo },
+  );
+  assert.equal(r3, "medium", "without --auto-effort, --effort is the fallback");
+
+  const r4 = await runWorkflowSource(
+    'export const meta = { name: "p4" }; return await agent("x");',
+    { runAgent: echo },
+  );
+  assert.equal(r4, "(none)", "no effort anywhere -> omitted (Codex config default)");
+}
+
+// 14) effortForLayerWidth boundaries (the one tunable knob).
+{
+  assert.equal(effortForLayerWidth(1), "xhigh");
+  assert.equal(effortForLayerWidth(2), "high");
+  assert.equal(effortForLayerWidth(7), "high");
+  assert.equal(effortForLayerWidth(8), "high", "floor is high, not medium");
+  assert.equal(effortForLayerWidth(50), "high", "wide fan-out still floors at high");
+  assert.equal(effortForLayerWidth(0), "xhigh", "degenerate width clamps to xhigh");
 }
 
 console.log("offline checks passed ✓");

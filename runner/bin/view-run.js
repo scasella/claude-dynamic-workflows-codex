@@ -407,7 +407,7 @@ svg.edges path.arrowhead{fill:var(--arrow)}
   animation:slidein .18s ease}
 @keyframes slidein{from{transform:translateX(24px);opacity:.5}to{transform:none;opacity:1}}
 .drawer-head{display:flex;align-items:flex-start;justify-content:space-between;padding:16px 18px 8px;gap:12px}
-.drawer-body{overflow:auto;padding:8px 18px 30px}
+.drawer-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto;padding:8px 18px 30px}
 .xbtn{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;width:30px;height:30px;
   cursor:pointer;font-size:13px;flex:none}
 .xbtn:hover{color:var(--text);border-color:var(--green)}

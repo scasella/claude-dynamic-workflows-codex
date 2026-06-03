@@ -39,7 +39,7 @@ The only global that calls a model. Runs `prompt` as one Codex thread+turn.
 | `model` | **Leave unset in scripts.** Runs are pinned to one latest-frontier model with `--frontier`, which overrides any per-call `model` anyway. (If you do set it, Claude ids/aliases auto-map to a Codex model.) |
 | `agentType` | name of a subagent in `.claude/agents/<name>.md`; its body becomes the system prompt, its frontmatter `model` a fallback |
 | `systemPrompt` | explicit developer instructions (overrides `agentType` body) |
-| `effort` | `none`/`minimal`/`low`/`medium`/`high`/`xhigh`. If unset, the agent inherits the Codex config default (`model_reasoning_effort`, often `xhigh`) — set it explicitly on multi-agent runs to avoid running everything at the top tier |
+| `effort` | `none`/`minimal`/`low`/`medium`/`high`/`xhigh`. **Usually leave unset and run with `--auto-effort`**, which scales effort to each layer's parallel width (1→`xhigh`, 2+→`high` — the floor) so lone gate agents think hardest while every fan-out still gets `high`. A per-call `effort` *overrides* the policy, so set it only as a deliberate exception. Precedence: `--pin-effort` > per-call `effort` > `--auto-effort` > `--effort` > Codex config default (`model_reasoning_effort`, often `xhigh`). |
 | `sandbox` | `read-only` \| `workspace-write` \| `danger-full-access` (default `workspace-write`) |
 | `isolation` | `'worktree'` → run in a detached git worktree at HEAD (parallel file-editing agents don't collide); kept if it leaves changes |
 | `cwd` | working directory for the thread (default the runner's cwd) |
@@ -145,7 +145,16 @@ run, claim unverified, file unread?"; its answer becomes the next round.
   single latest-frontier model (e.g. `gpt-5.5`) and **overrides any per-call
   `model`** — so leave `model` out of `agent()` opts. Mixing models or
   downgrading "cheap" stages is what produces inconsistent multi-model runs;
-  bound cost with `effort`/`budget` instead.
+  bound cost with effort/`budget` instead.
+- **Effort scales to layer width — let `--auto-effort` set it.** Don't hand-set
+  `effort` per agent. Run with `--auto-effort` and the runner reads each layer's
+  fan-out width (thunks in a `parallel()`, items in a `pipeline()` stage) and
+  picks effort: **1→`xhigh`** (a lone agent is a critical gate — consolidate,
+  judge, synthesize, report — so it thinks hardest) and **2+→`high`** (the
+  floor — every fan-out still thinks hard; the policy never drops to `medium`).
+  This means you express importance *structurally* — a synthesis you want done
+  well should be its own single-agent step, not buried inside a fan-out. Reserve
+  a per-call `effort` (which overrides the policy) for a rare exception.
 - **Determinism**: no `Math.random()`/`Date.now()`/argless `new Date()` in the
   script (blocked). Pass any timestamps/seeds via `args`; vary agent prompts by
   index, not randomness.
@@ -153,3 +162,15 @@ run, claim unverified, file unread?"; its answer becomes the next round.
   "thoroughly audit" → larger finder pool, 3–5 vote adversarial verify, a
   synthesis stage. `log()` anything you cap or drop so it doesn't read as full
   coverage.
+- **Heavy final stages are fragile.** A single report/synthesis agent that takes
+  the whole run as input, emits a long body, *and* writes a file is the most
+  common cause of a timed-out run (the 600s per-turn limit). Prefer: have the
+  agent **return** the artifact as a `schema` string and write the file from a
+  thin downstream step, keep its input trimmed, or raise its per-call
+  `timeoutMs`. If it does time out, the file is often already written and earlier
+  agents are journaled — assemble from the journal rather than re-running.
+- **Fenced code inside agent-written markdown.** When an agent emits markdown that
+  embeds triple-backtick blocks (e.g. a `/goal` containing ```bash fences) inside
+  another fence, the inner fence closes the outer one and headings leak into the
+  doc. Tell the agent to wrap such blocks in a **longer** fence (4–5 backticks)
+  than anything they contain.

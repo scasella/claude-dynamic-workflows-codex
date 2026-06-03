@@ -45,10 +45,12 @@ skill). It is dependency-free Node ≥ 18.
    project so they can read and rerun it — e.g. `./<name>.workflow.js`. Scripts
    are plain JavaScript using only the injected globals (no imports).
 
-3. **Run** it — **always pass `--frontier`** so every agent is pinned to the
-   latest frontier model (see *Model*):
+3. **Run** it — **always pass `--frontier` and `--auto-effort`**: `--frontier`
+   pins every agent to the latest frontier model (see *Model*); `--auto-effort`
+   scales each agent's thinking effort to its layer's parallel width, so critical
+   single-agent gates think hardest (see *Effort*):
    ```bash
-   node ~/.claude/skills/codex-workflows/runner/bin/run-workflow.js <script.js> --frontier [other flags]
+   node ~/.claude/skills/codex-workflows/runner/bin/run-workflow.js <script.js> --frontier --auto-effort [other flags]
    ```
    Progress streams on **stderr**; the workflow's return value prints as JSON on
    **stdout**. Capture stdout for the result (`… 1>/tmp/result.json`) when it's
@@ -78,7 +80,43 @@ the override. (To pin a specific model instead, use `--pin-model gpt-5.5`.)
 Also good practice, though `--frontier` makes it non-essential: don't set a
 per-call `model` in scripts — leave `model` out of every `agent()` opts object.
 
-Need to bound cost? Lower `--effort` and set `--budget` — do not switch models.
+Need to bound cost? Lower effort (see below) and set `--budget` — do not switch models.
+
+## Effort: scale thinking to layer width
+
+Thinking effort is the second dial (after model). The principle: **the fewer
+agents run in parallel at a step, the more pivotal each one is, so the harder it
+should think.** A lone agent in its layer is almost always a critical *gate* — a
+consolidation, a judge/synthesis, a final report — where one weak output sinks the
+whole run; it earns maximum reasoning. A 12-wide persona fan-out is the opposite:
+each agent is one voice among many, and redundancy covers individual misses.
+
+**Always pass `--auto-effort`.** The runner reads each layer's parallel width
+(the number of thunks in a `parallel()`, or items in a `pipeline()` stage) and
+sets effort automatically:
+
+| Parallel agents in the layer | Effort  | Typical role |
+|------------------------------|---------|--------------|
+| **1** (lone)                 | `xhigh` | consolidate / judge / synthesize / report — critical gate |
+| **2+** (any fan-out)         | `high`  | floor — wide fan-outs still think hard |
+
+So in a forge-style run, the `consolidate`, `portfolio-judge`, and `report-writer`
+agents automatically get `xhigh`; every fan-out — the 3–4-wide pain/mechanism/
+recombination waves *and* the 12-persona / 8-critic layers alike — gets `high`.
+The floor is `high`; the policy never drops to `medium`. No per-agent bookkeeping.
+
+Precedence (highest first): **`--pin-effort E`** (force every agent to `E`) →
+a script's **per-call `effort`** → **`--auto-effort`** layer policy → flat
+**`--effort E`** → Codex config default. Because per-call effort overrides the
+policy, **do not hand-set `effort` in scripts** — leave it out and let
+`--auto-effort` govern; reserve a per-call `effort` for a rare, deliberate
+exception (e.g. forcing `xhigh` on one unusually hard agent *inside* a wide
+layer).
+
+Bound cost without touching the model: keep `--auto-effort` but add a `--budget`
+backstop, or drop everything a tier with `--pin-effort medium`. The old flat
+`--effort medium` still works as a fallback when you don't pass `--auto-effort`,
+but the layer-aware policy is strictly better for multi-phase runs.
 
 ## Authoring (quick reference)
 
@@ -119,7 +157,8 @@ Globals:
 
 Key `agent()` opts: `schema` (JSON Schema → Codex `outputSchema`, result parsed),
 `model` (Claude ids/aliases auto-map to a Codex model), `agentType` (loads
-`.claude/agents/<name>.md` as the system prompt), `systemPrompt`, `effort`,
+`.claude/agents/<name>.md` as the system prompt), `systemPrompt`, `effort`
+(usually omit — let `--auto-effort` scale it to layer width; see *Effort*),
 `sandbox` (`read-only` | `workspace-write` | `danger-full-access`), `isolation:
 'worktree'`, `cwd`, `personality`, `retries`, `label`, `timeoutMs`.
 
@@ -136,7 +175,9 @@ run-workflow <script.js>
   --frontier       pin ALL agents to the auto-detected latest frontier model (recommended; overrides per-call model)
   --pin-model M    pin ALL agents to model M (overrides per-call model)
   --model M        fallback model when not pinned; Claude ids/aliases auto-map
-  --effort E       none|minimal|low|medium|high|xhigh; unset → Codex config default
+  --effort E       none|minimal|low|medium|high|xhigh; flat fallback; unset → Codex config default
+  --auto-effort    scale effort to layer width: 1→xhigh, 2+→high (floor) (recommended; overrides --effort)
+  --pin-effort E   force ALL agents to effort E (overrides per-call effort)
   --sandbox S      read-only | workspace-write | danger-full-access  (default workspace-write)
   --budget N       token ceiling backing budget.total / budget.remaining()
   --retries N      transient-error retries per agent (default 3)
@@ -145,20 +186,32 @@ run-workflow <script.js>
 ```
 
 - **Cost** — a run can spawn many agents and use real tokens. Keep the single
-  frontier model (see *Model*) and bound cost with `--effort low|medium` plus a
-  `--budget` backstop — **not** by downgrading to a smaller model. Use
-  `--sandbox read-only` unless agents must edit files.
-- **Effort default (important)** — the runner only sends a reasoning effort when
-  you set one (per-call `effort` or `--effort`). When unset, each agent inherits
-  the Codex config default — `model_reasoning_effort` in `~/.codex/config.toml`,
-  currently `xhigh`. So a workflow with no effort specified runs **every** agent
-  at the highest tier (slow and token-heavy across a fan-out). Always pass an
-  explicit `--effort` (or per-call `effort`) for multi-agent runs; reserve high/
-  xhigh for the few stages that truly need deep reasoning.
+  frontier model (see *Model*) and bound cost with `--auto-effort` (already
+  cheaper on wide layers) plus a `--budget` backstop — **not** by downgrading to a
+  smaller model. To squeeze further, `--pin-effort low`. Use `--sandbox read-only`
+  unless agents must edit files.
+- **Sizing `--budget`** — it is a *hard ceiling that throws mid-run*, not an
+  advisory: size it for the **whole fan-out**, not one agent. Rule of thumb:
+  medium-effort frontier (`gpt-5.5`) spends **~0.3–0.5M tokens/agent** (reasoning
+  included), so an N-agent run wants `--budget ≈ N × 500k` with headroom. (A
+  35-agent run blew past an 8M ceiling after only ~17 agents.) Tripping it isn't
+  fatal — `--resume` with a higher ceiling and the cached agents replay at 0
+  tokens.
+- **Effort (important)** — prefer **`--auto-effort`**, which sets each agent's
+  effort from its layer's parallel width (1→`xhigh`, 2+→`high`; the floor is
+  `high`; see *Effort*). Otherwise the runner only sends an effort when you set one (per-call
+  `effort` or `--effort`); when **nothing** is set, each agent inherits the Codex
+  config default — `model_reasoning_effort` in `~/.codex/config.toml`, currently
+  `xhigh` — so an effort-less workflow runs **every** agent at the highest tier
+  (slow and token-heavy across a fan-out). So for any multi-agent run, pass
+  `--auto-effort` (best) or at least a flat `--effort`; never leave effort
+  unspecified.
 - **Resume** — every run journals each completed `agent()` result. If a run is
   interrupted or trips `--budget`, rerun with `--resume` (and the **same**
-  model/effort/sandbox) — completed agents return from cache (0 tokens) and only
-  the rest run. `--fresh` discards the journal.
+  model + effort flags + sandbox) — completed agents return from cache (0 tokens)
+  and only the rest run. The effective effort is part of each agent's cache
+  identity, so toggling `--auto-effort`/`--pin-effort` between runs re-runs the
+  agents whose effort changed. `--fresh` discards the journal.
 
 ## Behaviors to know
 
@@ -172,6 +225,15 @@ run-workflow <script.js>
   and keep it identical for every agent.
 - **Determinism** — `Math.random()`, `Date.now()`, and argless `new Date()` are
   blocked inside scripts (they'd desync resume). Pass values via `args`.
+- **Per-turn timeout, and "failed" ≠ "did nothing"** — each `agent()` turn must
+  finish within **600s** (`codexAgent.js` default; raise it per-call with
+  `timeoutMs` for a heavy agent). A single *monolithic* agent — huge input + long
+  output + a file write — is the usual culprit and trips
+  `Timed out waiting for app-server notification`. Two takeaways: (1) split heavy
+  synthesis/report stages or bump their `timeoutMs`; (2) a timed-out/"failed" run
+  may have **already written files and journaled completed agents** — inspect the
+  workspace and `.workflow-journal/<name>.jsonl` *before* redoing work, then
+  `--resume` to finish (or assemble the final artifact from the journal results).
 - **Limits** — up to `min(16, cores−2)` agents run concurrently; 1,000 per run.
 
 ## When not to use

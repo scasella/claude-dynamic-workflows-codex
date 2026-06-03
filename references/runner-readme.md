@@ -75,7 +75,9 @@ run-workflow <script.js>
   --model M           fallback model (Claude ids/aliases auto-mapped); omit for config default
   --frontier          pin ALL agents to the auto-detected latest frontier model (overrides per-call model)
   --pin-model M       pin ALL agents to model M (overrides per-call model)
-  --effort E          none|minimal|low|medium|high|xhigh
+  --effort E          none|minimal|low|medium|high|xhigh (flat fallback)
+  --auto-effort       scale effort to each layer's parallel width: 1->xhigh, 2+->high (floor)
+  --pin-effort E      force ALL agents to effort E (overrides per-call effort)
   --sandbox S         read-only | workspace-write | danger-full-access
   --retries N         transient-error retries per agent (default 3)
   --resume            reuse prior results from the journal (skip unchanged agents)
@@ -83,6 +85,27 @@ run-workflow <script.js>
   --fresh             discard the journal before running
   --no-journal        disable journaling entirely
 ```
+
+### Layer-width effort (`--auto-effort`)
+
+`parallel()` and `pipeline()` publish how many agents run side-by-side in the
+current layer via an `AsyncLocalStorage` store (`runtime.js`); `agent()` reads it
+(default `1` for a lone, un-fanned-out call) and, when `--auto-effort` is on,
+maps width → effort with `effortForLayerWidth`:
+
+| layer width | effort  |
+| ----------- | ------- |
+| 1           | `xhigh` |
+| 2+          | `high`  |
+
+The rationale: a lone agent is a critical gate (consolidation / judge / report)
+where one weak output sinks the run, so it thinks hardest; every fan-out floors
+at `high` (the policy never drops to `medium`). The context propagates across awaits and through the
+vm-hosted thunks, so a queued or deeply-awaited agent still sees the width of the
+layer that spawned it. Effort precedence (highest first): `--pin-effort` →
+per-call `opts.effort` → `--auto-effort` → `--effort` → Codex config default. The
+*effective* effort is folded into each agent's journal identity, so toggling the
+policy between runs busts only the agents whose effort changed.
 
 ### Resume journal
 
@@ -128,7 +151,10 @@ A persisted script written for Claude Code rarely needs editing to run here:
 
 `schema`, `model`, `agentType`, `effort`, `sandbox`, `cwd`, `systemPrompt`,
 `personality`, `isolation`, `retries`, `timeoutMs`, `label`. Per-call `opts`
-override the CLI `--model/--effort/--sandbox/--retries` defaults.
+override the CLI `--model/--effort/--sandbox/--retries` defaults — except that
+`--frontier`/`--pin-model` force the model and `--pin-effort` forces the effort
+regardless of `opts`. A per-call `effort` overrides `--auto-effort` (so omit it
+unless you deliberately want to escape the layer-width policy for one agent).
 
 ## Implemented vs. extension points
 
