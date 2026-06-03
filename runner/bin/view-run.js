@@ -13,13 +13,13 @@
 //
 // Emits a single .html file (data embedded inline) and prints its path.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, basename, resolve, isAbsolute } from "node:path";
 import { execFile } from "node:child_process";
 
 // ── args ──────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false };
+  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false };
   const rest = argv.slice(2);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -28,6 +28,7 @@ function parseArgs(argv) {
     else if (a === "--out") out.outPath = rest[++i];
     else if (a === "--title") out.title = rest[++i];
     else if (a === "--open") out.open = true;
+    else if (a === "--watch") out.watch = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.target) out.target = a;
   }
@@ -74,30 +75,12 @@ if (!scriptPath) {
   }
 }
 
-// ── parse journal ─────────────────────────────────────────────────────────
-const journalRaw = readFileSync(journalPath, "utf8").trim();
-const entries = [];
-for (const line of journalRaw.split("\n")) {
-  if (!line.trim()) continue;
-  try {
-    const e = JSON.parse(line);
-    if (e && e.label) entries.push(e);
-  } catch {}
-}
-// Journal is append-only; keep the latest entry per key (resume can re-record).
-const byKey = new Map();
-for (const e of entries) byKey.set(e.key ?? e.label, e);
-const agentsRaw = [...byKey.values()];
-
-// ── parse script (meta + per-agent opts), best-effort ───────────────────────
+// ── run-model assembly ──────────────────────────────────────────────────────
+// `meta`/`specs`/`metaPhases` are module-level so the helpers below and a
+// --watch rebuild share them; assembleRun() (re)populates everything from disk.
 let meta = null;
 let specs = [];
-let scriptText = null;
-if (scriptPath && existsSync(scriptPath)) {
-  scriptText = readFileSync(scriptPath, "utf8");
-  meta = extractMeta(scriptText);
-  specs = parseAgentSpecs(scriptText);
-}
+let metaPhases = [];
 
 function extractMeta(src) {
   const m = src.match(/^[ \t]*export[ \t]+const[ \t]+meta[ \t]*=[ \t]*/m);
@@ -148,11 +131,6 @@ function specFor(label) {
   return best;
 }
 
-// ── assemble run model ──────────────────────────────────────────────────────
-const metaPhases = (meta && Array.isArray(meta.phases) ? meta.phases : []).map((p) =>
-  typeof p === "string" ? { title: p } : { title: p.title, detail: p.detail },
-);
-
 function phaseForLabel(label, spec) {
   if (spec && spec.phase) return spec.phase;
   if (label.includes(":")) {
@@ -166,55 +144,96 @@ function phaseForLabel(label, spec) {
   return "Agents";
 }
 
-const agents = agentsRaw.map((e, i) => {
-  const spec = specFor(e.label);
+// Read the journal + script from disk and assemble the run model the viewer
+// renders. Repopulates the module-level meta/specs/metaPhases caches, so a
+// --watch loop can call it again as the journal grows.
+function assembleRun() {
+  // journal is append-only; keep the latest entry per key (resume can re-record).
+  const byKey = new Map();
+  for (const line of readFileSync(journalPath, "utf8").trim().split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const e = JSON.parse(line);
+      if (e && e.label) byKey.set(e.key ?? e.label, e);
+    } catch {}
+  }
+  const agentsRaw = [...byKey.values()];
+
+  // script (meta + per-agent opts), best-effort — the fallback for journals that
+  // predate the per-agent metric fields.
+  meta = null;
+  specs = [];
+  if (scriptPath && existsSync(scriptPath)) {
+    const scriptText = readFileSync(scriptPath, "utf8");
+    meta = extractMeta(scriptText);
+    specs = parseAgentSpecs(scriptText);
+  }
+  metaPhases = (meta && Array.isArray(meta.phases) ? meta.phases : []).map((p) =>
+    typeof p === "string" ? { title: p } : { title: p.title, detail: p.detail },
+  );
+
+  // Prefer the per-agent fields the runtime now persists (phase/model/effort/
+  // tokens/ms); fall back to script regex + label heuristics for older journals.
+  const agents = agentsRaw.map((e, i) => {
+    const spec = specFor(e.label);
+    return {
+      label: e.label,
+      order: i,
+      phase: e.phase ?? phaseForLabel(e.label, spec),
+      model: e.model ?? spec?.model ?? null,
+      effort: e.effort ?? spec?.effort ?? null,
+      tokens: typeof e.tokens === "number" ? e.tokens : null,
+      ms: typeof e.ms === "number" ? e.ms : null,
+      result: e.result,
+    };
+  });
+
+  // phases in meta order, then any extra phases that appeared in the journal
+  const phaseOrder = [];
+  for (const p of metaPhases) if (!phaseOrder.includes(p.title)) phaseOrder.push(p.title);
+  for (const a of agents) if (!phaseOrder.includes(a.phase)) phaseOrder.push(a.phase);
+
+  const models = {};
+  for (const a of agents) if (a.model) models[a.model] = (models[a.model] || 0) + 1;
+
+  const totalTokens = agents.reduce((s, a) => s + (a.tokens || 0), 0);
+  const totalMs = agents.reduce((s, a) => s + (a.ms || 0), 0);
+  const hasMetrics = agents.some((a) => a.tokens != null || a.ms != null);
+
   return {
-    label: e.label,
-    order: i,
-    phase: phaseForLabel(e.label, spec),
-    model: spec?.model ?? null,
-    effort: spec?.effort ?? null,
-    result: e.result,
+    name: opts.title || (meta && meta.name) || basename(journalPath).replace(/\.workflow\.jsonl$|\.jsonl$/, ""),
+    description: (meta && meta.description) || "",
+    phases: phaseOrder.map((title) => {
+      const mp = metaPhases.find((p) => p.title === title);
+      return { title, detail: mp?.detail || "" };
+    }),
+    agents,
+    models,
+    totals: { tokens: totalTokens, ms: totalMs, hasMetrics },
+    counts: { phases: phaseOrder.length, agents: agents.length },
+    sources: {
+      journal: journalPath,
+      script: scriptPath && existsSync(scriptPath) ? scriptPath : null,
+      runDir,
+    },
+    generatedAt: new Date().toISOString(),
   };
-});
-
-// phases in meta order, then any extra phases that appeared in the journal
-const phaseOrder = [];
-for (const p of metaPhases) if (!phaseOrder.includes(p.title)) phaseOrder.push(p.title);
-for (const a of agents) if (!phaseOrder.includes(a.phase)) phaseOrder.push(a.phase);
-
-const models = {};
-for (const a of agents) if (a.model) models[a.model] = (models[a.model] || 0) + 1;
-
-const run = {
-  name: opts.title || (meta && meta.name) || basename(journalPath).replace(/\.workflow\.jsonl$|\.jsonl$/, ""),
-  description: (meta && meta.description) || "",
-  phases: phaseOrder.map((title) => {
-    const mp = metaPhases.find((p) => p.title === title);
-    return { title, detail: mp?.detail || "" };
-  }),
-  agents,
-  models,
-  counts: { phases: phaseOrder.length, agents: agents.length },
-  sources: {
-    journal: journalPath,
-    script: scriptPath && existsSync(scriptPath) ? scriptPath : null,
-    runDir,
-  },
-  generatedAt: new Date().toISOString(),
-};
+}
 
 // ── emit ────────────────────────────────────────────────────────────────────
 // (emit happens at the end of the file, once CSS/APP consts are initialized)
 
 // ── HTML template ─────────────────────────────────────────────────────────
-function renderHtml(runModel) {
+function renderHtml(runModel, live = false) {
   const dataJson = JSON.stringify(runModel).replace(/</g, "\\u003c");
+  // In --watch mode the file rewrites itself as the journal grows; a light meta
+  // refresh re-pulls it in the browser. (Self-contained otherwise — no refresh.)
+  const refresh = live ? `\n<meta http-equiv="refresh" content="2" />` : "";
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />${refresh}
 <title>${escapeHtml(runModel.name)} · codex-workflows run</title>
 <style>${CSS}</style>
 </head>
@@ -426,6 +445,12 @@ function computeModelColors(){const pal=MODEL_PALETTES[theme]||MODEL_PALETTES.da
   modelColor={}; Object.keys(RUN.models).sort().forEach((m,i)=>modelColor[m]=pal[i%pal.length]);}
 computeModelColors();
 function plural(n,w){return n+' '+w+(n===1?'':'s');}
+// metric formatters (per-agent tokens/time the runtime now persists)
+function fmtTokens(n){if(n==null)return null;if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1)+'M';if(n>=1e3)return Math.round(n/1e3)+'k';return String(n);}
+function fmtMs(ms){if(ms==null)return null;const s=ms/1000;if(s<60)return (s<10?s.toFixed(1):Math.round(s))+'s';const m=Math.floor(s/60);return m+'m'+String(Math.round(s%60)).padStart(2,'0')+'s';}
+const hasMetrics=()=>RUN.totals&&RUN.totals.hasMetrics;
+const phaseTokens=(t)=>agentsInPhase(t).reduce((s,a)=>s+(a.tokens||0),0);
+const phaseMs=(t)=>agentsInPhase(t).reduce((s,a)=>s+(a.ms||0),0);
 
 function h(tag, props, ...kids){
   const e=document.createElement(tag);
@@ -608,6 +633,8 @@ function renderRun(){
     const mods={}; kids.forEach(a=>{if(a.model)mods[a.model]=(mods[a.model]||0)+1;});
     if(Object.keys(mods).length) c.append(h('div',{class:'chips',style:{marginTop:'8px'}},
       Object.entries(mods).map(([mm,ct])=>h('span',{class:'chip',style:{color:modelColor[mm],borderColor:modelColor[mm]+'55'}},mm+(ct>1?' ×'+ct:'')))));
+    if(hasMetrics()){const pt=phaseTokens(p.title),pm=phaseMs(p.title);const parts=[pt?fmtTokens(pt)+' tokens':null,pm?fmtMs(pm)+' agent-time':null].filter(Boolean);
+      if(parts.length) c.append(h('div',{style:{marginTop:'8px',fontFamily:'var(--mono)',fontSize:'11px',color:'var(--dim)'}},parts.join('   ·   ')));}
     g.append(c);
   });
   m.append(g);
@@ -618,6 +645,10 @@ function renderRun(){
   const addkv=(k,v)=>{kv.append(h('div',{class:'k'},k));kv.append(h('div',{class:'v'},v));};
   addkv('agents',String(RUN.counts.agents));
   addkv('phases',String(RUN.counts.phases));
+  if(hasMetrics()){
+    if(RUN.totals.tokens) addkv('tokens',fmtTokens(RUN.totals.tokens)+'  ('+RUN.totals.tokens.toLocaleString()+')');
+    if(RUN.totals.ms) addkv('agent-time',fmtMs(RUN.totals.ms)+'  (sum of per-agent durations, not wall-clock)');
+  }
   if(Object.keys(RUN.models).length) addkv('models',h('div',{class:'chips'},Object.entries(RUN.models).map(([mm,ct])=>h('span',{class:'chip',style:{color:modelColor[mm],borderColor:modelColor[mm]+'55'}},mm+' ×'+ct))));
   meta.append(kv);
   m.append(meta);
@@ -637,6 +668,8 @@ function renderPhase(p){
     top.append(h('span',{class:'label-mono',style:{fontWeight:600}},a.label));
     if(a.model) top.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
     if(a.effort) top.append(h('span',{class:'pill'},'effort '+a.effort));
+    if(a.tokens!=null) top.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
+    if(a.ms!=null) top.append(h('span',{class:'pill'},fmtMs(a.ms)));
     top.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed'));
     c.append(top);
     const s=summarize(a.result); if(s) c.append(h('div',{class:'prose',style:{marginTop:'8px',color:'var(--muted)'}},s));
@@ -655,6 +688,8 @@ function renderAgent(a){
   chips.append(h('span',{class:'pill'},'phase · '+a.phase));
   if(a.model) chips.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
   if(a.effort) chips.append(h('span',{class:'pill'},'effort · '+a.effort));
+  if(a.tokens!=null) chips.append(h('span',{class:'pill'},'tokens · '+fmtTokens(a.tokens)));
+  if(a.ms!=null) chips.append(h('span',{class:'pill'},'time · '+fmtMs(a.ms)));
   chips.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed'));
   m.append(chips);
   m.append(h('h2',{class:'sec'},'Result'));
@@ -695,6 +730,10 @@ function renderHeader(){
   meta.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}), RUN.counts.agents+'/'+RUN.counts.agents+' completed'));
   meta.append(h('span',{class:'pill'},plural(RUN.counts.phases,'phase')));
   meta.append(h('span',{class:'pill'},plural(RUN.counts.agents,'agent')));
+  if(hasMetrics()){
+    if(RUN.totals.tokens) meta.append(h('span',{class:'pill'},fmtTokens(RUN.totals.tokens)+' tokens'));
+    if(RUN.totals.ms) meta.append(h('span',{class:'pill'},fmtMs(RUN.totals.ms)+' agent-time'));
+  }
   Object.entries(RUN.models).forEach(([mm,ct])=>meta.append(h('span',{class:'chip',style:{color:modelColor[mm],borderColor:modelColor[mm]+'55'}},mm+' ×'+ct)));
   head.append(meta);
   return head;
@@ -709,7 +748,7 @@ function renderFooter(){
 
 // map nodes / rows
 function agentNode(a){
-  const tip=(a.model?'['+a.model+(a.effort?' · '+a.effort:'')+'] ':'')+(summarize(a.result)||a.label);
+  const tip=(a.model?'['+a.model+(a.effort?' · '+a.effort:'')+'] ':'')+(a.tokens!=null?fmtTokens(a.tokens)+' tok · ':'')+(summarize(a.result)||a.label);
   const n=h('div',{class:'mnode agent',title:tip,onclick:()=>openDrawer(a.label)});
   n.append(h('span',{class:'msdot'}));
   n.append(h('span',{class:'mlabel'}, a.label.includes(':')?a.label.split(':').slice(1).join(':'):a.label));
@@ -730,6 +769,8 @@ function phaseRow(p,i){
     h('div',{class:'plabel'}, h('span',{class:'pidx'},(i+1)), p.title),
     p.detail?h('div',{class:'pdetail'},p.detail):null,
     h('div',{class:'pcount'},all.length+(all.length===1?' agent':' parallel')));
+  if(hasMetrics()){const pt=phaseTokens(p.title),pm=phaseMs(p.title);const parts=[pt?fmtTokens(pt)+' tok':null,pm?fmtMs(pm):null].filter(Boolean);
+    if(parts.length) gut.append(h('div',{class:'pcount'},parts.join(' · ')));}
   const nodes=h('div',{class:'mnodes'}); const els=[];
   ags.forEach(a=>{const n=agentNode(a); els.push(n); nodes.append(n);});
   if(all.length>MAP_CAP){
@@ -853,6 +894,8 @@ function buildDrawer(label){
   const chips=h('div',{class:'metarow',style:{padding:'0 18px 4px'}});
   if(a.model) chips.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
   if(a.effort) chips.append(h('span',{class:'pill'},'effort · '+a.effort));
+  if(a.tokens!=null) chips.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
+  if(a.ms!=null) chips.append(h('span',{class:'pill'},fmtMs(a.ms)));
   chips.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed'));
   chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerAgent=null;select({type:'agent',id:label});}},'open in tree ↗'));
   panel.append(chips);
@@ -901,10 +944,31 @@ render();
 const outPath =
   (opts.outPath && resolve(opts.outPath)) ||
   join(runDir, basename(journalPath).replace(/\.jsonl$/, "") + ".run.html");
-writeFileSync(outPath, renderHtml(run));
+writeFileSync(outPath, renderHtml(assembleRun(), opts.watch));
 console.log(outPath);
 
 if (opts.open) {
   const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
   execFile(opener, [outPath], () => {});
+}
+
+// --watch: rebuild the HTML as the journal grows, so an open tab tracks a live
+// run (the page auto-refreshes every 2s). Runs until Ctrl-C.
+if (opts.watch) {
+  console.error(`↻ watching ${journalPath} — rebuilding ${outPath} on change (Ctrl-C to stop)`);
+  let lastSize = -1;
+  const tick = () => {
+    let size = -1;
+    try { size = statSync(journalPath).size; } catch {}
+    if (size !== lastSize) {
+      lastSize = size;
+      try {
+        writeFileSync(outPath, renderHtml(assembleRun(), true));
+        console.error(`  · rebuilt (${new Date().toISOString()}) — ${size} bytes journal`);
+      } catch (e) {
+        console.error(`  ! rebuild failed: ${e?.message ?? e}`);
+      }
+    }
+  };
+  setInterval(tick, 1500);
 }

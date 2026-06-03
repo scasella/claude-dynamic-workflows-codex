@@ -153,14 +153,17 @@ Globals:
 - `phase(title)` / `log(msg)` → progress (stderr).
 - `args` → the value passed via `--args` / `--args-file`.
 - `budget` → `{ total, spent(), remaining() }` (token accounting).
-- `workflow({ scriptPath }, args?)` → run another script inline (one level).
+- `workflow(ref, args?)` → run another script inline (one level). `ref` is a
+  `{ scriptPath }`, a path string, or a saved-workflow **name** resolved from
+  `.claude/workflows/` then `~/.claude/workflows/`.
 
 Key `agent()` opts: `schema` (JSON Schema → Codex `outputSchema`, result parsed),
 `model` (Claude ids/aliases auto-map to a Codex model), `agentType` (loads
 `.claude/agents/<name>.md` as the system prompt), `systemPrompt`, `effort`
 (usually omit — let `--auto-effort` scale it to layer width; see *Effort*),
 `sandbox` (`read-only` | `workspace-write` | `danger-full-access`), `isolation:
-'worktree'`, `cwd`, `personality`, `retries`, `label`, `timeoutMs`.
+'worktree'`, `cwd`, `personality`, `retries`, `label`, `phase` (group/attribute
+this agent — set it inside concurrent `pipeline`/`parallel` stages), `timeoutMs`.
 
 Read **`references/authoring.md`** for the full guide and the standard quality
 patterns (adversarial verify, judge panel, loop-until-budget, multi-modal sweep),
@@ -180,6 +183,8 @@ run-workflow <script.js>
   --pin-effort E   force ALL agents to effort E (overrides per-call effort)
   --sandbox S      read-only | workspace-write | danger-full-access  (default workspace-write)
   --budget N       token ceiling backing budget.total / budget.remaining()
+  --budget-meter M what budget.spent() counts: total (default) | output (native pool)
+  --plan           dry run: count agents per phase/effort + estimate a --budget (no tokens)
   --retries N      transient-error retries per agent (default 3)
   --resume         reuse prior results from the journal (skip unchanged agents)
   --journal PATH | --fresh | --no-journal
@@ -191,12 +196,14 @@ run-workflow <script.js>
   smaller model. To squeeze further, `--pin-effort low`. Use `--sandbox read-only`
   unless agents must edit files.
 - **Sizing `--budget`** — it is a *hard ceiling that throws mid-run*, not an
-  advisory: size it for the **whole fan-out**, not one agent. Rule of thumb:
-  medium-effort frontier (`gpt-5.5`) spends **~0.3–0.5M tokens/agent** (reasoning
-  included), so an N-agent run wants `--budget ≈ N × 500k` with headroom. (A
-  35-agent run blew past an 8M ceiling after only ~17 agents.) Tripping it isn't
-  fatal — `--resume` with a higher ceiling and the cached agents replay at 0
-  tokens.
+  advisory: size it for the **whole fan-out**, not one agent. Run **`--plan`**
+  first — a no-token dry run that counts agents per phase/effort and prints an
+  estimated `--budget` (a lower bound for fan-outs sized from agent output). Rule
+  of thumb: medium-effort frontier (`gpt-5.5`) spends **~0.3–0.5M tokens/agent**
+  (reasoning included), so an N-agent run wants `--budget ≈ N × 500k` with
+  headroom. (A 35-agent run blew past an 8M ceiling after only ~17 agents.)
+  Tripping it isn't fatal — the CLI prints a ready-to-paste `--resume` command
+  with a higher ceiling, and the cached agents replay at 0 tokens.
 - **Effort (important)** — prefer **`--auto-effort`**, which sets each agent's
   effort from its layer's parallel width (1→`xhigh`, 2+→`high`; the floor is
   `high`; see *Effort*). Otherwise the runner only sends an effort when you set one (per-call
@@ -254,8 +261,10 @@ node ~/.claude/skills/codex-workflows/runner/bin/view-run.js <project-dir> --ope
 
 It auto-finds the journal and the `*.workflow.js` script in that dir (or pass
 `--journal PATH` / `--script PATH` / `--out PATH`), writes `<name>.run.html`, and
-`--open` launches it. Offline/self-contained (data embedded). Two views, toggled
-top-right:
+`--open` launches it. Offline/self-contained (data embedded). Per-agent **tokens,
+time, model, and effort** (recorded by the runner) show per agent, per phase, and
+per run; add **`--watch`** to rebuild the HTML live as a run progresses. Two views,
+toggled top-right:
 
 - **◇ Map** (default) — the execution map: orchestrator → one row of parallel
   agents per phase → barrier merges → result, with connectors. Click any agent

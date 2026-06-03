@@ -72,6 +72,8 @@ run-workflow <script.js>
   --args JSON         value exposed to the script as `args`
   --args-file PATH    same, read from a file
   --budget N          token ceiling backing budget.total / budget.remaining()
+  --budget-meter M    what budget.spent() counts: total (input+output, default) | output
+  --plan              dry run: count agents per phase/effort + estimate a budget (no model)
   --model M           fallback model (Claude ids/aliases auto-mapped); omit for config default
   --frontier          pin ALL agents to the auto-detected latest frontier model (overrides per-call model)
   --pin-model M       pin ALL agents to model M (overrides per-call model)
@@ -115,6 +117,36 @@ with `--resume` and unchanged agents return instantly from cache (0 tokens);
 edited prompts/opts miss and re-run. This is the runner's analogue of native
 `resumeFromRunId` — and it makes a mid-run failure (or a tripped `--budget`)
 cheap to recover from: bump the limit, `--resume`, and only the unfinished work runs.
+On a `--budget` trip the CLI prints a paste-ready `--resume --budget <2×>` command.
+
+### Per-agent metrics & the viewer
+
+Alongside each result, the journal records non-identity attribution: the agent's
+**phase** (`opts.phase`, else the ambient `phase()`), **effort**, resolved
+**model**, **tokens** (total and output-only), and **wall time** — captured in
+`codexAgent.js` (host clock + the `thread/tokenUsage/updated` total for that
+thread) and folded in by `runtime.js`. `view-run.js` reads these straight from the
+journal (falling back to script regex for older journals) and renders token totals
+and time per agent, per phase, and per run — the data the native `/workflows` view
+shows. `view-run.js <dir> --watch` rebuilds the HTML as the journal grows so an
+open tab tracks a live run (it auto-refreshes every 2s).
+
+### Budget metering (`--budget-meter`)
+
+`budget.spent()`/`remaining()` count **total** tokens (input+output+reasoning) by
+default — a conservative cost bound, and what the `--plan` estimate and the
+budget-sizing rule of thumb assume. Pass `--budget-meter output` to count only
+output+reasoning, matching the native runtime's output-token pool, for scripts
+whose `budget`-driven loops were written against that semantics.
+
+### Dry-run planning (`--plan`)
+
+`--plan` executes the orchestration with `agent()` stubbed — it returns a JSON
+Schema *skeleton* (objects filled, arrays empty) instead of calling a model — and
+records each would-be agent's phase/effort/width to print a per-phase count and an
+estimated `--budget`. Because skeleton arrays are empty, a fan-out sized from a
+prior agent's output is **uncounted** (a lower bound); the CLI says so. Static
+fan-outs (over `args`, fixed lists) count exactly.
 
 ### Worktree isolation
 
@@ -150,7 +182,7 @@ A persisted script written for Claude Code rarely needs editing to run here:
 ### `agent(prompt, opts)` options
 
 `schema`, `model`, `agentType`, `effort`, `sandbox`, `cwd`, `systemPrompt`,
-`personality`, `isolation`, `retries`, `timeoutMs`, `label`. Per-call `opts`
+`personality`, `isolation`, `retries`, `timeoutMs`, `label`, `phase`. Per-call `opts`
 override the CLI `--model/--effort/--sandbox/--retries` defaults — except that
 `--frontier`/`--pin-model` force the model and `--pin-effort` forces the effort
 regardless of `opts`. A per-call `effort` overrides `--auto-effort` (so omit it
@@ -161,29 +193,33 @@ unless you deliberately want to escape the layer-width policy for one agent).
 **Implemented & tested:** stdio transport + handshake, `thread/start`/`turn/start`,
 final-message capture, native `outputSchema` structured output, `agent`,
 `parallel`, `pipeline`, `phase`, `log`, `budget` (token metering + enforcement),
-**model translation + `model/list` preflight**, **`agentType`** resolution,
-**retry-with-backoff + app-server reconnect**, an **isolated `node:vm` script
-sandbox** (no fs/shell/process/fetch/import; non-deterministic builtins blocked),
-**`isolation:'worktree'`**, the **resume journal** (`--resume`), one-level
-`workflow({scriptPath})` nesting, and the CLI. Validated end-to-end on real
-multi-phase runs (parallel schema reviewers feeding a consolidator), including
-budget-stop-then-resume. See `examples/demo/` for a bundled sample run.
+**per-call `opts.phase` grouping**, **per-agent metrics** (phase/effort/model/
+tokens/time persisted to the journal, rendered by the viewer), **model translation
++ `model/list` preflight**, **`agentType`** resolution, **retry-with-backoff +
+app-server reconnect**, an **isolated `node:vm` script sandbox** (no fs/shell/
+process/fetch/import; non-deterministic builtins blocked), **`isolation:'worktree'`**,
+the **resume journal** (`--resume`), the **named-workflow registry**
+(`workflow("name")` → `.claude/workflows/` then `~/.claude/workflows/`),
+**`--plan` dry-run estimation**, **`--budget-meter total|output`**, **`--watch`
+live viewer**, one-level `workflow({scriptPath} | "name")` nesting, and the CLI.
+Validated end-to-end on real multi-phase runs (parallel schema reviewers feeding a
+consolidator), including budget-stop-then-resume. See `examples/demo/` for a
+bundled sample run.
 
 **Extension points (not yet wired):**
 
-- **`opts.phase` grouping** — the `phase()` global groups progress, but a per-call
-  `agent(p, { phase: 'X' })` hint is currently ignored (cosmetic).
-- **Named-workflow registry** — `workflow("name")` currently supports only the
-  `{scriptPath}` form (no `.claude/workflows/` lookup).
 - **Warm-context resume** — the journal replays *results*; it does not yet reuse
   Codex thread state via `thread/resume` / `thread/fork`.
-- **Budget accounting** — totals sum input+output tokens per process (native counts
-  output tokens, shared pool); a budget-driven loop differs slightly across a resume.
+- **Budget accounting across a resume** — totals are per process; `--budget-meter`
+  selects total vs output (the native pool), but a `budget`-driven loop can still
+  differ slightly across a resume since cached agents replay at 0 tokens.
 
 ## Pinning to a Codex version
 
-Method names/shapes here were verified against the installed `codex` 0.135.0. To
-re-verify or regenerate for another version:
+Method names/shapes here were verified against the installed `codex` 0.135.0
+(`src/codexVersion.js` → `VERIFIED_CODEX_VERSION`). The handshake preflight
+(`npm run handshake`) prints the detected version and warns on drift. To re-verify
+or regenerate bindings for another version:
 
 ```bash
 codex app-server generate-json-schema --out ./schema

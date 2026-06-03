@@ -10,7 +10,7 @@
 
 import { setTimeout as sleep } from "node:timers/promises";
 import { AppServerClient } from "./appServerClient.js";
-import { recordTokenUsage } from "./meter.js";
+import { recordTokenUsage, tokensForThread } from "./meter.js";
 import { resolveModel, modelId } from "./modelMap.js";
 import { loadAgentType } from "./agentTypes.js";
 
@@ -115,6 +115,7 @@ export async function codexAgent(prompt, opts = {}) {
 
 async function runOneTurn(prompt, opts) {
   const { log } = opts;
+  const startedAt = Date.now(); // host clock — the script's Date.now is blocked, this isn't
   const client = await getClient(opts.clientOptions); // live (reconnects if needed)
   const model = resolveModel(opts.requestedModel, availableModels, log);
 
@@ -168,6 +169,16 @@ async function runOneTurn(prompt, opts) {
       err.codexErrorInfo = turn.error?.codexErrorInfo;
       throw err;
     }
+
+    // Per-agent attribution for the journal/viewer: wall time for this turn, the
+    // tokens this thread consumed (cumulative, by completion), and the model the
+    // turn actually ran on. Off the hot path — a side-channel callback, so the
+    // value returned to the script is unchanged.
+    opts.onMetrics?.({
+      ms: Date.now() - startedAt,
+      model: model ?? null,
+      tokens: tokensForThread(threadId),
+    });
 
     const text = finalText || (deltas.size ? [...deltas.values()].join("") : "");
     if (opts.schema) {

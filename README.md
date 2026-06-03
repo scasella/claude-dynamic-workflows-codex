@@ -105,9 +105,10 @@ node runner/bin/run-workflow.js examples/demo/nimbus-landing-redesign.workflow.j
 ```
 
 Useful flags: `--frontier` (pin all agents to the auto-detected latest frontier
-model), `--effort low|medium|high`, `--sandbox read-only|workspace-write`,
-`--budget N` (token ceiling), `--resume` (reuse a prior run's results from the
-journal). See `runner/bin/run-workflow.js --help`.
+model), `--auto-effort` (scale effort to layer width), `--plan` (dry-run agent
+count + budget estimate, no tokens), `--sandbox read-only|workspace-write`,
+`--budget N` (token ceiling) with `--budget-meter total|output`, `--resume` (reuse
+a prior run's results from the journal). See `runner/bin/run-workflow.js --help`.
 
 A minimal script:
 
@@ -135,7 +136,9 @@ node runner/bin/view-run.js <project-dir> --open
 node runner/bin/view-run.js --journal path/to.jsonl --script path/to.workflow.js --out run.html
 ```
 
-The viewer has two layouts (toggle top-right) and works for any run shape:
+The viewer has two layouts (toggle top-right) and works for any run shape. It
+surfaces per-agent **tokens and time** (recorded by the runner) at agent, phase,
+and run level; add `--watch` to rebuild the HTML live as a run progresses:
 
 - **◇ Map** — the execution map. Opens at a readable 100%, centered; **Fit** (`F`)
   frames the whole graph, scroll zooms toward the cursor, drag pans.
@@ -193,13 +196,14 @@ the agents act.
 ## Limitations (honest)
 
 - This is a **standalone re-host**, not the in-Claude-Code experience: no in-session
-  background tasks, no `/workflows` TUI, no save-as-`/command`.
-- A handful of native fidelity nuances aren't replicated 1:1 (per-call `phase`
-  grouping, named-workflow registry, exact output-token budget accounting,
-  warm-context resume). The map models barrier/phase structure (a clean
+  background tasks, no `/workflows` TUI, no save-as-`/command` — though `--watch`
+  gives a live viewer and `workflow("name")` resolves saved workflows from
+  `.claude/workflows/`.
+- A couple of native nuances aren't replicated 1:1: **warm-context resume** (the
+  journal replays *results*, not Codex thread state via `thread/fork`), and budget
+  accounting is per-process (`--budget-meter` selects total vs the native
+  output-token pool). The map models barrier/phase structure (a clean
   approximation for pipeline-shaped runs). Details in the internals doc.
-- Per-agent timing/tokens aren't yet persisted, so the viewer shows structure +
-  results, not a cost/timeline breakdown.
 
 ## Development
 
@@ -221,7 +225,7 @@ runner/                   standalone runner (Node, zero deps)
   src/                    codexAgent (the seam) + runtime, transport, helpers
   test/                   offline + view-run robustness + handshake
 references/               authoring.md (DSL) · runner-readme.md (internals)
-examples/                 hello.workflow.js · review.workflow.js · demo/ (bundled run)
+examples/                 hello · review · tournament-sort · triage · classify-route · deep-research · demo/
 docs/                     screenshots
 ```
 

@@ -72,6 +72,15 @@ const cases = [
     J({ key: "m2#0", label: "audit:str", result: "a plain string result" }),
     J({ key: "m3#0", label: "audit:nul", result: null }) ] },
   { name: "empty", lines: [] },
+  // Per-agent metric fields the runtime now persists (phase/model/effort/tokens/ms)
+  // — the viewer should read them straight from the journal, no script needed.
+  { name: "enriched", lines: [
+    J({ key: "e1#0", label: "scan:auth", result: { findings: [{ title: "missing check", severity: "high" }] },
+      phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 412000, tokensOut: 90000, ms: 5300 }),
+    J({ key: "e2#0", label: "scan:routes", result: { findings: [] },
+      phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 308000, tokensOut: 61000, ms: 4100 }),
+    J({ key: "e3#0", label: "consolidate", result: { summary: "one real issue" },
+      phase: "Report", model: "gpt-5.5", effort: "xhigh", tokens: 980000, tokensOut: 210000, ms: 21000 }) ] },
   { name: "scripted-pipeline", lines: ["x.ts", "y.ts"].flatMap((f) => [
     J({ key: "s_" + f + "#0", label: "scan:" + f, result: { findings: [] } }),
     J({ key: "v_" + f + "#0", label: "verify:" + f, result: { real: false, reason: "clean" } }) ]),

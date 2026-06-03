@@ -5,6 +5,29 @@ an isolated context. It begins with a pure-literal `meta`, then a body that uses
 the injected globals. Top-level `await` works, and a top-level `return` is the
 workflow's result.
 
+## Why a workflow (the failure modes it fixes)
+
+A workflow moves the *plan* into code, so the orchestration — the loop, the
+branching, the intermediate results — lives in script variables instead of one
+agent's context window. That's what lets it apply a *repeatable quality pattern*,
+not just run more agents. The three failure modes it's built to fix (from the
+dynamic-workflows announcement) are worth keeping in mind, because each maps to a
+pattern below:
+
+- **Agentic laziness** — an agent declares a complex, multi-part job done after
+  partial progress ("35 of 50"). Fix: the *script* owns the worklist and the
+  loop, so coverage is structural — **loop-until-dry**, **pipeline over a fixed
+  list**, **completeness critic**.
+- **Self-preferential bias** — an agent prefers its own output when asked to judge
+  it. Fix: a *separate* agent verifies — **adversarial / perspective-diverse
+  verify**, **judge panel**, **tournament**.
+- **Goal drift** — fidelity to the original objective erodes across many turns,
+  especially after compaction. Fix: each agent gets a fresh, narrow context with
+  the goal restated — **fan-out-and-synthesize**, **classify-and-act**.
+
+If a task doesn't risk any of these, it probably doesn't need a workflow — do it
+directly. Scale the machinery to the ask.
+
 ## `meta`
 
 Must be the first statement and a **pure literal** (no variables, calls, or
@@ -46,6 +69,7 @@ The only global that calls a model. Runs `prompt` as one Codex thread+turn.
 | `personality` | `none` \| `friendly` \| `pragmatic` |
 | `retries` | transient-error retries (default 3) |
 | `label` | display label in progress output |
+| `phase` | phase this agent belongs to; **overrides the ambient `phase()`**. Persisted to the journal so the viewer groups it correctly even inside concurrent `pipeline`/`parallel` stages, where the global `phase()` races. Set it on agents you fan out per-stage. |
 | `timeoutMs` | max wait for the turn (default 600000) |
 
 ### `parallel(thunks) → Promise<any[]>`
@@ -132,6 +156,33 @@ while (budget.total && budget.remaining() > 50_000) {
 **Completeness critic** — a final agent that asks "what's missing — modality not
 run, claim unverified, file unread?"; its answer becomes the next round.
 
+**Classify-and-act (router)** — one classifier agent labels the task, then the
+script branches to a specialized handler. Use it to give each branch a fresh,
+goal-restated context (fights goal drift). *Codex note:* the native version routes
+cheap branches to a smaller model; here, keep one model and let effort be the
+lever (see below). Runnable: `examples/classify-route.workflow.js`.
+
+**Tournament / pairwise-sort** — rank a list too big for one context by a
+qualitative criterion: bucket it, rank each bucket in parallel, then a lone judge
+k-way-merges the bucket orders. Bucket width bounds each agent's input.
+Runnable: `examples/tournament-sort.workflow.js`.
+
+**Triage + quarantine** — classify a batch in parallel, dedupe in plain code,
+then a single router proposes actions from the *structured labels* — not the raw,
+untrusted item text. Keep the classifiers `sandbox:'read-only'` so untrusted
+content never reaches a write-capable agent (privilege separation shrinks the
+injection surface). Runnable: `examples/triage.workflow.js`.
+
+**Generate-and-filter** — spawn N candidate attempts, then filter by a rubric or a
+verifier pass; a special case of the judge panel when you only need "good enough,"
+not "the best."
+
+**Deep verification / fan-out research** — identify every checkable claim, then
+spin off one verifier per claim against the source; synthesize only what survives.
+This is the shape of the bundled `/deep-research`. Runnable:
+`examples/deep-research.workflow.js` (over a codebase; swap the reader prompts for
+web search if your Codex has web tools).
+
 ## Codex-specific authoring notes
 
 - **Agents do the I/O, not the script.** The script is sandboxed (no fs/shell). To
@@ -141,11 +192,24 @@ run, claim unverified, file unread?"; its answer becomes the next round.
 - **Schemas**: prefer an object at the root with `additionalProperties:false` and
   explicit `required`. The result is parsed JSON; the runner tolerates ```json
   fences as a fallback but a clean object root is most reliable.
-- **One frontier model for every agent.** Runs use `--frontier`, which pins a
-  single latest-frontier model (e.g. `gpt-5.5`) and **overrides any per-call
-  `model`** — so leave `model` out of `agent()` opts. Mixing models or
-  downgrading "cheap" stages is what produces inconsistent multi-model runs;
-  bound cost with effort/`budget` instead.
+- **One model, effort is the lever.** Runs use `--frontier`, which pins a single
+  latest-frontier model (e.g. `gpt-5.5`) and **overrides any per-call `model`** —
+  so leave `model` out of `agent()` opts. This is a deliberate divergence from the
+  native blog's "classify-and-route to Sonnet vs Opus": instead of *model* routing
+  for cost, this re-host keeps one model and uses **thinking effort** as the dial
+  (`--auto-effort` scales it to layer width; `--effort`/`--pin-effort`/`--budget`
+  bound it). Mixing models or downgrading "cheap" stages is what produces
+  inconsistent multi-model runs — don't.
+- **Size the budget with `--plan` first.** A dry run executes the orchestration
+  with `agent()` stubbed (no model, no tokens), counts agents per phase/effort,
+  and prints an estimated `--budget`. Fan-outs sized from *agent output* (a
+  `pipeline`/`parallel` over a previous agent's array) come back empty in a dry
+  run, so the count is a **lower bound** — re-run `--plan` on a small `--args`
+  slice for a tighter number.
+- **Per-agent metrics are recorded.** Each completed `agent()` journals its phase,
+  effort, resolved model, tokens, and wall time. `view-run.js` renders them
+  (per-agent, per-phase, per-run); `view-run.js <dir> --watch` rebuilds the HTML
+  live as a run progresses.
 - **Effort scales to layer width — let `--auto-effort` set it.** Don't hand-set
   `effort` per agent. Run with `--auto-effort` and the runner reads each layer's
   fan-out width (thunks in a `parallel()`, items in a `pipeline()` stage) and

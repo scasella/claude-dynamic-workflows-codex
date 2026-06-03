@@ -71,8 +71,14 @@ export class Journal {
     return this.#cache.get(key)?.result;
   }
 
-  async record(key, label, result) {
+  // `meta` carries non-identity per-agent attribution (phase, effort, model,
+  // tokens, ms) for the viewer. Only defined values are persisted, so old
+  // journals and metric-less runs stay valid.
+  async record(key, label, result, meta = {}) {
     const entry = { key, label, result };
+    for (const [k, v] of Object.entries(meta)) {
+      if (v !== undefined && v !== null) entry[k] = v;
+    }
     this.#cache.set(key, entry);
     if (!this.#path) return;
     await mkdir(dirname(this.#path), { recursive: true });

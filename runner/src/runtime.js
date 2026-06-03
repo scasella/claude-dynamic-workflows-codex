@@ -7,11 +7,65 @@
 // min(16, cores-2), with a hard 1000-agent backstop.
 
 import os from "node:os";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { codexAgent } from "./codexAgent.js";
-import { tokensSpent } from "./meter.js";
+import { tokensSpent, outputSpent } from "./meter.js";
 
 const CAP = Math.min(16, Math.max(1, (os.cpus()?.length ?? 4) - 2));
+
+// A path-like workflow ref (has a separator or a .js/.mjs/.cjs extension) is used
+// verbatim; anything else is a saved-workflow *name* resolved via the registry.
+function looksLikePath(s) {
+  return s.includes("/") || s.includes("\\") || /\.[cm]?js$/.test(s);
+}
+
+// Named-workflow registry: resolve `workflow("name")` to a script file, project
+// scope (.claude/workflows/) shadowing home (~/.claude/workflows/), matching the
+// native save locations. `<name>.js` and `<name>.workflow.js` both accepted.
+function resolveNamedWorkflow(name) {
+  const dirs = [
+    join(process.cwd(), ".claude", "workflows"),
+    join(os.homedir(), ".claude", "workflows"),
+  ];
+  const files = [`${name}.js`, `${name}.workflow.js`, `${name}.mjs`];
+  for (const d of dirs) {
+    for (const f of files) {
+      const p = join(d, f);
+      if (existsSync(p)) return p;
+    }
+  }
+  throw new Error(
+    `workflow("${name}"): no saved workflow found. Searched ${dirs.join(" and ")} ` +
+      `for ${name}.js / ${name}.workflow.js`,
+  );
+}
+
+// Build a minimal value that satisfies a JSON Schema, so a --plan dry run can let
+// the orchestration logic run (property access, .map over arrays) without calling
+// a model. Arrays come back EMPTY — fan-outs sized from agent output are therefore
+// uncounted (a lower bound); the CLI flags this.
+export function schemaSkeleton(schema) {
+  if (!schema || typeof schema !== "object") return "";
+  return skel(schema);
+}
+function skel(s) {
+  if (!s || typeof s !== "object") return null;
+  if (Array.isArray(s.enum) && s.enum.length) return s.enum[0];
+  if (s.oneOf || s.anyOf) return skel((s.oneOf || s.anyOf)[0]);
+  const t = Array.isArray(s.type) ? s.type[0] : s.type;
+  if (t === "object" || (!t && s.properties)) {
+    const o = {};
+    for (const k of Object.keys(s.properties || {})) o[k] = skel(s.properties[k]);
+    return o;
+  }
+  if (t === "array") return [];
+  if (t === "number" || t === "integer") return 0;
+  if (t === "boolean") return false;
+  if (t === "string") return "";
+  return null;
+}
 
 // Layer-width context. parallel()/pipeline() publish how many agents run
 // side-by-side in the current layer; agent() reads it (default 1 for a lone,
@@ -65,29 +119,35 @@ async function pooled(thunk) {
 export function createRuntime({
   args,
   budgetTotal = null,
+  budgetMeter = "total", // "total" (input+output, default) | "output" (native pool)
   defaults = {},
   defaultModel,
   pinnedModel,
   autoEffort = false,
   pinnedEffort = null,
+  plan = false, // --plan dry run: count agents, never call a model
   onPhase,
   onLog,
+  onAgentPlan, // dry-run sink: receives { label, phase, effort, width, schema } per agent
   journal = null,
   runAgent = codexAgent, // seam: injected in tests to capture resolved opts
 } = {}) {
   let agentCount = 0;
+  let currentPhase = null; // last phase() title; the fallback when opts.phase is unset
   const AGENT_CAP = 1000;
+  const meterSpent = () => (budgetMeter === "output" ? outputSpent() : tokensSpent());
 
   async function agent(prompt, opts = {}) {
-    if (budgetTotal && tokensSpent() >= budgetTotal) {
-      throw new Error(`Token budget exhausted (${tokensSpent()}/${budgetTotal})`);
-    }
     if (++agentCount > AGENT_CAP) {
       throw new Error(`Agent cap (${AGENT_CAP}) exceeded — runaway workflow?`);
     }
     const merged = { ...defaults, ...opts };
     const label =
       opts.label || (typeof prompt === "string" ? prompt.slice(0, 64) : "agent");
+    // Phase attribution: an explicit per-call `phase` wins (the reliable signal
+    // inside concurrent pipeline/parallel stages, where the global phase() races),
+    // else the last phase() title. Persisted to the journal for the viewer.
+    const effectivePhase = opts.phase ?? currentPhase ?? null;
 
     // Resolve thinking effort. Precedence (highest first):
     //   pinnedEffort (--pin-effort)        authoritative, like --pin-model
@@ -104,6 +164,19 @@ export function createRuntime({
     else if (autoEffort) { merged.effort = effortForLayerWidth(width); effortSrc = "auto"; }
     else if (defaults.effort != null) { merged.effort = defaults.effort; effortSrc = "flag"; }
     else { delete merged.effort; effortSrc = "default"; }
+
+    // --plan dry run: record the would-be agent and return a schema skeleton so
+    // the orchestration keeps running. No model call, no budget, no journal.
+    if (plan) {
+      onAgentPlan?.({ label, phase: effectivePhase, effort: merged.effort ?? null, width, schema: !!opts.schema });
+      return schemaSkeleton(opts.schema);
+    }
+
+    if (budgetTotal && meterSpent() >= budgetTotal) {
+      const err = new Error(`Token budget exhausted (${meterSpent()}/${budgetTotal} ${budgetMeter} tokens)`);
+      err.code = "BUDGET_EXCEEDED";
+      throw err;
+    }
 
     // Resume journal: allocate a stable key (called on every run, even a cache
     // miss, to keep occurrence counters aligned) and short-circuit on a hit.
@@ -122,10 +195,22 @@ export function createRuntime({
       ? `  ⟪${merged.effort}${effortSrc === "auto" ? `·layer×${width}` : ""}⟫`
       : "";
     onLog?.(`  · agent: ${label}${opts.schema ? "  [schema]" : ""}${effortTag}`);
+    // Capture per-agent metrics off a side channel (the model-facing return value
+    // is unchanged); fold them into the journal entry alongside phase/effort/model.
+    let metrics = null;
     const result = await pooled(() =>
-      runAgent(prompt, { ...merged, defaultModel, pinnedModel, log: onLog }),
+      runAgent(prompt, { ...merged, defaultModel, pinnedModel, log: onLog, onMetrics: (m) => { metrics = m; } }),
     );
-    if (key) await journal.record(key, label, result);
+    if (key) {
+      await journal.record(key, label, result, {
+        phase: effectivePhase,
+        effort: merged.effort ?? null,
+        model: metrics?.model ?? (pinnedModel ?? opts.model ?? defaultModel) ?? null,
+        tokens: metrics?.tokens?.total ?? null,
+        tokensOut: metrics?.tokens ? metrics.tokens.output + metrics.tokens.reasoning : null,
+        ms: metrics?.ms ?? null,
+      });
+    }
     return result;
   }
 
@@ -172,6 +257,7 @@ export function createRuntime({
   }
 
   function phase(title) {
+    currentPhase = title;
     onPhase?.(title);
   }
   function log(message) {
@@ -180,27 +266,37 @@ export function createRuntime({
 
   const budget = {
     total: budgetTotal,
-    spent: () => tokensSpent(),
-    remaining: () => (budgetTotal ? Math.max(0, budgetTotal - tokensSpent()) : Infinity),
+    spent: () => meterSpent(),
+    remaining: () => (budgetTotal ? Math.max(0, budgetTotal - meterSpent()) : Infinity),
   };
 
-  // Nested workflow: {scriptPath} form, one level deep (matches the native cap).
+  // Nested workflow, one level deep (matches the native cap). Accepts a
+  // {scriptPath}, a path string, a saved-workflow name (registry), or {name}.
   async function workflow(ref, subArgs) {
-    const scriptPath = typeof ref === "string" ? ref : ref?.scriptPath;
-    if (!scriptPath) {
-      throw new Error("workflow(): only the {scriptPath} form is supported in this runner");
+    let scriptPath;
+    if (ref && typeof ref === "object" && ref.scriptPath) {
+      scriptPath = ref.scriptPath;
+    } else {
+      const name = typeof ref === "string" ? ref : ref?.name;
+      if (!name) {
+        throw new Error("workflow(): pass a {scriptPath}, a saved-workflow name, or {name}");
+      }
+      scriptPath = looksLikePath(name) ? name : resolveNamedWorkflow(name);
     }
     const { runWorkflowFile } = await import("./runWorkflow.js");
     return runWorkflowFile(scriptPath, {
       args: subArgs,
       budgetTotal,
+      budgetMeter,
       defaults,
       defaultModel,
       pinnedModel,
       autoEffort,
       pinnedEffort,
+      plan,
       onPhase,
       onLog,
+      onAgentPlan,
       journal,
       nested: true,
     });

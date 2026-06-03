@@ -3,10 +3,15 @@
 //   2. reconnect — after shutdown, getClient() spins up a fresh app-server.
 
 import { getClient, shutdownClient } from "../src/codexAgent.js";
+import { detectCodexVersion, versionDriftNote, VERIFIED_CODEX_VERSION } from "../src/codexVersion.js";
 
 try {
   const client = await getClient();
   console.log("state:", client.readyState);
+  const ver = await detectCodexVersion();
+  console.log("codex version:", ver ?? "(unknown)", `(runner verified against ${VERIFIED_CODEX_VERSION})`);
+  const drift = versionDriftNote(ver);
+  if (drift) console.error(drift);
   const models = await client.listModels();
   console.log("models exposed:", models.length);
   const sample = models.slice(0, 6).map((m) =>

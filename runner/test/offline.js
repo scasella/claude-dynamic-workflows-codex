@@ -4,16 +4,18 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractMeta, runWorkflowSource } from "../src/runWorkflow.js";
-import { effortForLayerWidth } from "../src/runtime.js";
+import { effortForLayerWidth, schemaSkeleton } from "../src/runtime.js";
 import { isGitRepo, createWorktree } from "../src/worktree.js";
 import { identityHash, Journal } from "../src/journal.js";
 import { resolveModel, pickFrontier } from "../src/modelMap.js";
 import { loadAgentType } from "../src/agentTypes.js";
 import { isRetryable } from "../src/codexAgent.js";
+import { recordTokenUsage, resetMeter, tokensSpent, outputSpent, tokensForThread } from "../src/meter.js";
+import { versionDriftNote } from "../src/codexVersion.js";
 
 const exec = promisify(execFile);
 
@@ -263,6 +265,110 @@ const exec = promisify(execFile);
   assert.equal(effortForLayerWidth(8), "high", "floor is high, not medium");
   assert.equal(effortForLayerWidth(50), "high", "wide fan-out still floors at high");
   assert.equal(effortForLayerWidth(0), "xhigh", "degenerate width clamps to xhigh");
+}
+
+// 15) per-agent metrics + phase persisted to the journal. The runAgent seam
+//     reports metrics via onMetrics; phase comes from phase()/opts.phase.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-journal-"));
+  const jpath = join(dir, "m.jsonl");
+  const j = new Journal(jpath, { reuse: false });
+  await j.load();
+  const echo = async (_p, o) => {
+    o.onMetrics?.({ ms: 42, model: "gpt-5.5", tokens: { input: 10, output: 5, reasoning: 3, total: 18 } });
+    return "ok";
+  };
+  await runWorkflowSource(
+    [
+      'export const meta = { name: "m" };',
+      'phase("Scan");',
+      'await agent("a");',
+      'await agent("b", { phase: "Verify" });',
+      "return 1;",
+    ].join("\n"),
+    { runAgent: echo, journal: j, autoEffort: true },
+  );
+  const lines = (await readFile(jpath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, 2, "two agents journaled");
+  assert.equal(lines[0].phase, "Scan", "currentPhase attributed when opts.phase unset");
+  assert.equal(lines[1].phase, "Verify", "opts.phase overrides currentPhase");
+  assert.equal(lines[0].tokens, 18, "total tokens persisted");
+  assert.equal(lines[0].tokensOut, 8, "output+reasoning persisted");
+  assert.equal(lines[0].ms, 42, "wall time persisted");
+  assert.equal(lines[0].model, "gpt-5.5", "resolved model persisted");
+  assert.equal(lines[0].effort, "xhigh", "lone agent under --auto-effort -> xhigh");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 16) schemaSkeleton: minimal value satisfying a schema; arrays come back empty.
+{
+  assert.deepEqual(
+    schemaSkeleton({
+      type: "object",
+      properties: { findings: { type: "array" }, title: { type: "string" }, n: { type: "integer" }, ok: { type: "boolean" } },
+    }),
+    { findings: [], title: "", n: 0, ok: false },
+  );
+  assert.equal(schemaSkeleton(undefined), "", "no schema -> empty string (schema-less agent)");
+  assert.equal(schemaSkeleton({ enum: ["a", "b"] }), "a", "enum -> first value");
+}
+
+// 17) --plan: agent() short-circuits to skeletons (no model), records per-agent.
+{
+  const recs = [];
+  const r = await runWorkflowSource(
+    [
+      'export const meta = { name: "p" };',
+      'phase("Scan");',
+      'const a = await agent("x", { schema: { type: "object", properties: { items: { type: "array" } } } });',
+      'const w = await parallel([() => agent("y"), () => agent("z")]);',
+      "return { n: a.items.length, w: w.length };",
+    ].join("\n"),
+    { plan: true, autoEffort: true, onAgentPlan: (x) => recs.push(x) },
+  );
+  assert.equal(recs.length, 3, "all three agents recorded in plan");
+  assert.equal(recs[0].phase, "Scan");
+  assert.equal(recs[0].effort, "xhigh", "lone agent -> xhigh");
+  assert.equal(recs[1].effort, "high", "width-2 fan-out -> high");
+  assert.equal(r.n, 0, "schema array skeleton is empty (dynamic widths uncounted)");
+  assert.equal(r.w, 2, "parallel still returns an array of skeletons");
+}
+
+// 18) token meter: total vs output, and per-thread attribution.
+{
+  resetMeter();
+  recordTokenUsage({ threadId: "t1", tokenUsage: { total: { inputTokens: 100, outputTokens: 20, reasoningOutputTokens: 5 } } });
+  recordTokenUsage({ threadId: "t2", tokenUsage: { total: { inputTokens: 50, outputTokens: 10, reasoningOutputTokens: 0 } } });
+  assert.equal(tokensSpent(), 185, "total = input+output+reasoning across threads");
+  assert.equal(outputSpent(), 35, "output = output+reasoning across threads");
+  const t1 = tokensForThread("t1");
+  assert.equal(t1.total, 125);
+  assert.equal(t1.output, 20);
+  assert.equal(tokensForThread("nope"), null, "unknown thread -> null");
+  resetMeter();
+}
+
+// 19) workflow("name") resolves a saved workflow from .claude/workflows/.
+{
+  const root = await mkdtemp(join(tmpdir(), "wf-registry-"));
+  await mkdir(join(root, ".claude", "workflows"), { recursive: true });
+  await writeFile(join(root, ".claude", "workflows", "child.js"), 'export const meta = { name: "child" };\nreturn 7;\n');
+  const prev = process.cwd();
+  process.chdir(root);
+  try {
+    const r = await runWorkflowSource('export const meta = { name: "parent" };\nreturn await workflow("child");', {});
+    assert.equal(r, 7, "named workflow resolved from .claude/workflows and ran");
+  } finally {
+    process.chdir(prev);
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+// 20) codex version drift note: null when matching/unknown, warns on mismatch.
+{
+  assert.equal(versionDriftNote("0.135.0", "0.135.0"), null, "match -> no note");
+  assert.equal(versionDriftNote(null, "0.135.0"), null, "unknown version -> no note");
+  assert.match(versionDriftNote("0.140.0", "0.135.0"), /0\.140\.0[\s\S]*0\.135\.0/, "drift -> warns with both versions");
 }
 
 console.log("offline checks passed ✓");
