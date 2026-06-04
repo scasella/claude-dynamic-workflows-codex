@@ -41,11 +41,13 @@ function smoke(htmlPath) {
     getElementById: (id) => (id === "run-data" ? { textContent: DATA } : makeEl("div")),
     querySelector: () => null,
   };
-  // Exercise both views, both themes, and a drawer (drill-down) on the last agent.
+  // Exercise both views, both themes, an agent drawer, and (when a result was
+  // persisted) the result drawer + inline Run-overview result render.
   const exercise = `
     ;view='tree';render();view='map';theme='light';render();theme='dark';render();
     if(RUN.agents&&RUN.agents.length){openDrawer(RUN.agents[RUN.agents.length-1].label);closeDrawer();}
-    globalThis.__OUT={phases:RUN.phases.length,agents:RUN.agents.length};`;
+    if(typeof openResultDrawer==='function'&&RUN.result!=null){openResultDrawer();closeDrawer();view='tree';sel={type:'run'};render();}
+    globalThis.__OUT={phases:RUN.phases.length,agents:RUN.agents.length,hasResult:RUN.result!=null};`;
   try {
     new Function(APP + exercise)();
     return { ok: true, info: globalThis.__OUT };
@@ -91,6 +93,16 @@ const cases = [
       phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 308000, tokensOut: 61000, ms: 4100 }),
     J({ key: "e3#0", label: "consolidate", result: { summary: "one real issue" },
       phase: "Report", model: "gpt-5.5", effort: "xhigh", tokens: 980000, tokensOut: 210000, ms: 21000 }) ] },
+  // Persisted workflow result (the *.result.json sidecar): the viewer should show
+  // the honest return value (result node → result drawer, Run overview inline).
+  { name: "with-result",
+    lines: [
+      J({ key: "c1#0", label: "critique:web-ux", result: { verdict: "ok" }, phase: "Critique" }),
+      J({ key: "c2#0", label: "critique:perf", result: { verdict: "ok" }, phase: "Critique" }),
+      J({ key: "s1#0", label: "synthesize:plan", result: { headline: "do X" }, phase: "Synthesize" }) ],
+    result: { headline: "Ship the state-preserving live viewer first",
+      prioritized_changes: [{ change: "kill meta refresh", impact: "high", effort: "M" }],
+      quick_wins: ["atomic writes", "ticking elapsed"] } },
   { name: "scripted-pipeline", lines: ["x.ts", "y.ts"].flatMap((f) => [
     J({ key: "s_" + f + "#0", label: "scan:" + f, result: { findings: [] } }),
     J({ key: "v_" + f + "#0", label: "verify:" + f, result: { real: false, reason: "clean" } }) ]),
@@ -108,6 +120,7 @@ for (const c of cases) {
   writeFileSync(join(jdir, c.name + ".workflow.jsonl"), c.lines.join("\n"));
   if (c.events) writeFileSync(join(jdir, c.name + ".workflow.events.jsonl"), c.events.join("\n"));
   if (c.script) writeFileSync(join(dir, c.name + ".workflow.js"), c.script);
+  if (c.result !== undefined) writeFileSync(join(jdir, c.name + ".workflow.result.json"), JSON.stringify(c.result));
   const out = join(ROOT, c.name + ".html");
   let r;
   try {
@@ -117,7 +130,7 @@ for (const c of cases) {
     r = { ok: false, err: "generate failed: " + ((e.stderr && e.stderr.toString()) || e.message) };
   }
   if (r.ok) {
-    console.log(`  ✓ ${c.name.padEnd(18)} phases=${r.info.phases} agents=${r.info.agents}`);
+    console.log(`  ✓ ${c.name.padEnd(18)} phases=${r.info.phases} agents=${r.info.agents}${r.info.hasResult ? " · result✓" : ""}`);
   } else {
     failed++;
     console.error(`  ✗ ${c.name}: ${String(r.err).slice(0, 300)}`);

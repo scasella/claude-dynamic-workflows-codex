@@ -10,6 +10,7 @@
   "license": "MIT",
   "scripts": {
     "handshake": "node test/handshake.js",
+    "test": "node test/offline.js && node test/map-run.test.js && node test/view-run.test.js && node test/view-run.live.test.js",
     "example": "node bin/run-workflow.js ../examples/hello.workflow.js --frontier"
   },
   "engines": {

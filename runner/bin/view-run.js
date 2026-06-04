@@ -13,14 +13,38 @@
 //
 // Emits a single .html file (data embedded inline) and prints its path.
 
-import { writeFileSync, statSync } from "node:fs";
+import { writeFileSync, statSync, renameSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { locateRun, buildLiveRunModel, eventsPathFor } from "../src/runModel.js";
 
+// Write atomically so a watching browser never loads a half-written file:
+// write to a unique temp path in the same dir, then rename (atomic on POSIX).
+let __atomicSeq = 0;
+function writeAtomic(outPath, content) {
+  const tmp = `${outPath}.tmp-${process.pid}-${__atomicSeq++}`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, outPath);
+}
+
+// Live data sidecars next to the HTML — the no-reload update channel. The page
+// polls <base>.gen.js (a tiny monotonic counter); when it advances, it pulls
+// <base>.data.js (window.__wfPush(gen, model)) and reconciles in place. Loaded
+// via classic <script src> injection, which works on file:// (unlike fetch).
+function sidecarBase(outPath) {
+  return outPath.replace(/\.html?$/i, "");
+}
+function writeSidecars(outPath, runModel, gen) {
+  const base = sidecarBase(outPath);
+  const json = JSON.stringify(runModel).replace(/</g, "\\u003c");
+  writeAtomic(base + ".data.js", `window.__wfPush&&window.__wfPush(${gen},${json});\n`);
+  writeAtomic(base + ".gen.js", `window.__wfGen&&window.__wfGen(${gen});\n`);
+}
+const nowGen = () => Date.now(); // gen = wall-clock ms: monotonic enough + cross-process comparable
+
 // ── args ──────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false };
+  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false, settle: false };
   const rest = argv.slice(2);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -30,6 +54,7 @@ function parseArgs(argv) {
     else if (a === "--title") out.title = rest[++i];
     else if (a === "--open") out.open = true;
     else if (a === "--watch") out.watch = true;
+    else if (a === "--settle") out.settle = true; // final render: static HTML + a final sidecar so an open live page settles
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.target) out.target = a;
   }
@@ -55,16 +80,18 @@ const buildModel = () => buildLiveRunModel({ journalPath, scriptPath, runDir, ti
 // (emit happens at the end of the file, once CSS/APP consts are initialized)
 
 // ── HTML template ─────────────────────────────────────────────────────────
-function renderHtml(runModel, live = false) {
+function renderHtml(runModel, live = false, gen = 0) {
+  if (gen) runModel.gen = gen; // generation stamp: lets the live page detect fresh sidecar data
   const dataJson = JSON.stringify(runModel).replace(/</g, "\\u003c");
-  // In --watch mode the file rewrites itself as the journal grows; a light meta
-  // refresh re-pulls it in the browser. (Self-contained otherwise — no refresh.)
-  const refresh = live ? `\n<meta http-equiv="refresh" content="2" />` : "";
+  // In --watch mode the page updates WITHOUT reloading: it polls tiny gen.js /
+  // data.js sidecars (classic <script src>, file://-safe) and reconciles the DOM
+  // in place — no flash, no drawer re-slide. data-live="1" turns that loop on;
+  // "0" is a settled/static render (data fully inlined, no polling, works offline).
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-live="${live ? "1" : "0"}">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />${refresh}
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(runModel.name)} · codex-workflows run</title>
 <style>${CSS}</style>
 </head>
@@ -83,9 +110,9 @@ function escapeHtml(s) {
 const CSS = String.raw`
 :root{
   --bg:#07080A; --panel:#0D1015; --panel2:#14181F; --border:#1e2731; --border2:#2a343f;
-  --text:#E6EDF3; --muted:#7d8893; --dim:#586471;
+  --text:#E6EDF3; --muted:#8b96a1; --dim:#7b8794;
   --green:#6EE7B7; --amber:#FBBF24; --red:#F87171; --blue:#60A5FA; --purple:#A78BFA; --cyan:#22D3EE;
-  --edge:#4d5b69; --arrow:#586a79;
+  --edge:#4d5b69; --arrow:#586a79; --focus:#7cc4ff; --sw-bg:#0b0e12;
   --endpoint-bg:linear-gradient(180deg,#121b27,#0b1017); --endpoint-text:#f3f7fa; --endpoint-border:#2c4a59;
   --barrier:#3a4855; --barrier-dot:#10161d; --barrier-dot-border:#46586a;
   --header-bg:linear-gradient(180deg,#0c1016,#080a0d); --sidebar-bg:#090b0e; --surface-hover:#11151b;
@@ -96,14 +123,18 @@ const CSS = String.raw`
 }
 .theme-light{
   --bg:#f6f5ef; --panel:#ffffff; --panel2:#ffffff; --border:#e4e2d8; --border2:#d6d4c8;
-  --text:#1b1e22; --muted:#6c7177; --dim:#a6abb0;
-  --green:#0e9d6b; --amber:#b45309; --red:#dc2626; --blue:#2563eb; --purple:#7c3aed; --cyan:#0891b2;
-  --edge:#595d55; --arrow:#42463e;
+  --text:#1b1e22; --muted:#5f6670; --dim:#6b727c;
+  --green:#047857; --amber:#b45309; --red:#dc2626; --blue:#2563eb; --purple:#7c3aed; --cyan:#0e7490;
+  --edge:#595d55; --arrow:#42463e; --focus:#1d6fd6; --sw-bg:#f8f7f1;
   --endpoint-bg:#1c1f24; --endpoint-text:#ffffff; --endpoint-border:#1c1f24;
   --barrier:#cdcbbf; --barrier-dot:#ffffff; --barrier-dot-border:#bcbaae;
   --header-bg:linear-gradient(180deg,#fbfaf5,#f2f1e9); --sidebar-bg:#f1f0e8; --surface-hover:#efeee6;
   --hero-bg:linear-gradient(180deg,#ffffff,#f7f6f0); --hero-border:#dde6e1;
   --tag-bg:#f0efe7; --json-bg:#faf9f3; --row-hover:#f4f3eb; --backdrop:rgba(28,30,28,.30); --swatch-border:rgba(0,0,0,.16);
+}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:6px}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -131,6 +162,15 @@ header{border-bottom:1px solid var(--border);padding:14px 20px;background:
 .mnode.running{border-color:var(--amber)}
 .chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:5px;border:1px solid var(--border2);white-space:nowrap}
 
+/* live status strip (--watch) */
+.livebar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:6px;padding:7px 11px;border-radius:8px;
+  background:var(--surface-hover);border:1px solid var(--border2);font-family:var(--mono);font-size:11px;color:var(--muted)}
+.livebar .lk{color:var(--dim);text-transform:uppercase;letter-spacing:.08em;font-size:10px;margin-right:5px}
+.livebar .lv{color:var(--text)}
+.livebar.stale{border-color:var(--amber)} .livebar.stale .stale-flag{color:var(--amber)}
+.livedot{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 8px var(--amber);
+  animation:wfpulse 1.2s ease-in-out infinite}
+
 /* layout */
 .body{flex:1;display:grid;grid-template-columns:330px 1fr;min-height:0}
 .sidebar{border-right:1px solid var(--border);overflow:auto;padding:10px 8px;background:var(--sidebar-bg)}
@@ -151,6 +191,13 @@ header{border-bottom:1px solid var(--border);padding:14px 20px;background:
 .node.agent .sdot{width:6px;height:6px;border-radius:50%;background:var(--green);flex:none}
 .children{margin-left:14px;border-left:1px solid var(--border);padding-left:2px}
 .idx{color:var(--dim);font-size:10px;margin-right:2px}
+/* inline phase progress + agent metrics in the tree (dense inspector) */
+.node .pmeta{margin-left:auto;display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;color:var(--dim);flex:none}
+.node .pmeta .run{color:var(--amber)}
+.pbar{width:42px;height:4px;border-radius:3px;background:var(--border2);overflow:hidden;position:relative;flex:none}
+.pbar>i{position:absolute;left:0;top:0;bottom:0;background:var(--green);border-radius:3px}
+.node.agent .ameta{margin-left:auto;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;color:var(--dim);flex:none}
+.node.agent .ameta .run{color:var(--amber)}
 
 /* main content */
 h2.sec{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
@@ -182,14 +229,23 @@ ul.clean li{margin:3px 0}
 .badge{font-family:var(--mono);font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:4px;text-transform:uppercase;letter-spacing:.04em}
 .swatches{display:flex;flex-wrap:wrap;gap:8px}
 .sw{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--text);
-  border:1px solid var(--border);border-radius:6px;padding:4px 8px;background:#0b0e12}
+  border:1px solid var(--border);border-radius:6px;padding:4px 8px;background:var(--sw-bg)}
 .sw .chip-color{width:16px;height:16px;border-radius:4px;border:1px solid var(--swatch-border);flex:none}
-table.t{border-collapse:collapse;width:100%;font-size:12.5px;margin:4px 0}
-table.t th{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);
-  text-align:left;font-weight:600;padding:6px 10px;border-bottom:1px solid var(--border2);white-space:nowrap}
+.tablewrap{border:1px solid var(--border);border-radius:8px;overflow:auto;max-height:62vh;margin:4px 0}
+table.t{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+table.t thead th{position:sticky;top:0;z-index:1;background:var(--panel);font-family:var(--mono);font-size:10.5px;
+  letter-spacing:.05em;text-transform:uppercase;color:var(--dim);text-align:left;font-weight:600;padding:6px 10px;
+  border-bottom:1px solid var(--border2);white-space:nowrap}
 table.t td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+table.t tbody tr:last-child td{border-bottom:0}
 table.t td.num{font-family:var(--mono);text-align:center;white-space:nowrap}
-table.t tr:hover td{background:var(--row-hover)}
+table.t tbody tr:hover td{background:var(--row-hover)}
+.subitems{display:flex;flex-direction:column;gap:0}
+.subitem{padding:8px 0;border-top:1px solid var(--border)}
+.subitem:first-child{border-top:0;padding-top:2px}
+.showall{font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--surface-hover);
+  border:1px solid var(--border2);border-radius:6px;padding:5px 10px;cursor:pointer;margin:6px 0 2px}
+.showall:hover{color:var(--text);border-color:var(--green)}
 .scorepill{display:inline-block;min-width:26px;text-align:center;font-family:var(--mono);font-weight:700;
   font-size:11px;padding:1px 6px;border-radius:5px;color:#06110c}
 details.raw{margin-top:14px;border-top:1px solid var(--border);padding-top:10px}
@@ -204,8 +260,8 @@ footer{border-top:1px solid var(--border);padding:8px 20px;font-family:var(--mon
 /* ── view toggle ─────────────────────────────────────────────────────────── */
 .toggles{margin-left:auto;display:flex;gap:10px;align-items:center}
 .toggle{display:flex;border:1px solid var(--border2);border-radius:8px;overflow:hidden}
-.tg{background:transparent;color:var(--muted);border:0;padding:6px 13px;font-family:var(--mono);font-size:11px;
-  cursor:pointer;letter-spacing:.05em}
+.tg{background:transparent;color:var(--muted);border:0;padding:7px 13px;font-family:var(--mono);font-size:11px;
+  cursor:pointer;letter-spacing:.05em;min-height:34px;display:inline-flex;align-items:center}
 .tg.on{background:var(--surface-hover);color:var(--green)}
 .tg+.tg{border-left:1px solid var(--border2)}
 
@@ -215,20 +271,24 @@ footer{border-top:1px solid var(--border);padding:8px 20px;font-family:var(--mon
 .mapcanvas{position:relative;min-width:max-content;margin:0;padding:48px 64px 88px;display:flex;flex-direction:column;will-change:transform}
 .mapctl{position:absolute;right:16px;bottom:16px;display:flex;align-items:center;gap:6px;z-index:5;
   background:var(--panel);border:1px solid var(--border2);border-radius:10px;padding:5px 7px;box-shadow:0 6px 20px rgba(0,0,0,.28)}
-.zb{background:transparent;border:1px solid var(--border2);color:var(--text);border-radius:7px;min-width:30px;height:28px;
+.zb{background:transparent;border:1px solid var(--border2);color:var(--text);border-radius:7px;min-width:34px;height:32px;
   cursor:pointer;font-size:14px;font-family:var(--mono);line-height:1;padding:0 9px}
 .zb:hover{border-color:var(--green);color:var(--green)}
 .zb.fit{font-size:11px}
 .zlbl{font-family:var(--mono);font-size:11px;color:var(--muted);min-width:44px;text-align:center}
 svg.edges{position:absolute;left:0;top:0;pointer-events:none;z-index:0;overflow:visible}
-svg.edges path.edge{fill:none;stroke:var(--edge);stroke-width:1.75;stroke-linecap:round}
+svg.edges path.edge{fill:none;stroke:var(--edge);stroke-width:1.75;stroke-linecap:round;vector-effect:non-scaling-stroke}
+svg.edges path.edge.live{stroke:var(--amber);stroke-width:2}
+svg.edges path.edge.pending{stroke-dasharray:4 5;opacity:.5}
 svg.edges path.arrowhead{fill:var(--arrow)}
 .mrow{position:relative;z-index:1;display:grid;grid-template-columns:264px minmax(420px,1fr) 264px;align-items:center}
 .mrow.phase{padding:34px 0}
 .mrow.orch,.mrow.result{padding:16px 0}
 .mgutter.left{padding-right:52px;text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:5px}
 .mcenter{grid-column:2;display:flex;flex-direction:column;align-items:center;gap:10px}
-.mnodes{grid-column:2;display:flex;justify-content:center;flex-wrap:wrap;gap:24px}
+.mnodes{grid-column:2;display:grid;grid-template-columns:repeat(auto-fit,168px);justify-content:center;
+  align-items:start;gap:18px 20px;max-width:920px;margin:0 auto}
+.mnodes .mnode{width:168px;min-width:0}
 .plabel{font-family:var(--sans);font-size:14.5px;color:var(--text);font-weight:650;letter-spacing:-.01em;display:flex;gap:8px;align-items:center}
 .pidx{color:var(--muted);font-family:var(--mono);font-size:10px;border:1px solid var(--border2);border-radius:5px;padding:1px 6px}
 .pdetail{color:var(--muted);font-size:11.5px;max-width:200px;line-height:1.5}
@@ -237,11 +297,17 @@ svg.edges path.arrowhead{fill:var(--arrow)}
   min-width:146px;display:flex;flex-direction:column;align-items:center;gap:8px;cursor:pointer;
   transition:border-color .14s ease,box-shadow .14s ease}
 .mnode.agent:hover{border-color:var(--green);box-shadow:0 2px 14px rgba(0,0,0,.28)}
-.mnode .mlabel{font-family:var(--sans);font-size:14px;color:var(--text);font-weight:600;letter-spacing:-.005em;white-space:nowrap}
+.mnode .mlabel{font-family:var(--sans);font-size:14px;color:var(--text);font-weight:600;letter-spacing:-.005em;
+  text-align:center;max-width:184px;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .mnode .mmodel{font-size:10px !important;padding:1px 7px !important}
-.mnode.more{border-style:dashed;background:transparent;min-width:auto;padding:12px 18px}
-.mnode.more .mlabel{color:var(--muted);font-weight:600}
-.mnode.more:hover{border-color:var(--green)} .mnode.more:hover .mlabel{color:var(--text)}
+.mstats{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;color:var(--dim);flex-wrap:wrap;justify-content:center}
+.mstats .st{color:var(--muted)} .mstats .st.run{color:var(--amber)}
+.mnode.more{border-style:dashed;background:transparent}
+.mnode.more .mlabel{color:var(--text);font-weight:600}
+.mnode.more:hover{border-color:var(--green)} .mnode.more:hover .mlabel{color:var(--green)}
+.mnode.more .magg{display:flex;flex-direction:column;align-items:center;gap:3px;font-family:var(--mono);font-size:10px;color:var(--dim)}
+.mnode.more .magg .run{color:var(--amber)}
+.mnode.more .maggchips{display:flex;flex-wrap:wrap;gap:3px;justify-content:center}
 .msdot{width:6px;height:6px;border-radius:50%;background:var(--green);position:absolute;top:12px;right:12px;opacity:.8}
 .mnode.endpoint{background:var(--endpoint-bg);border-color:var(--endpoint-border);min-width:176px;padding:17px 28px;cursor:default;gap:4px}
 .mnode.endpoint .mlabel{font-family:var(--sans);color:var(--endpoint-text);font-size:15px;font-weight:650;letter-spacing:-.01em}
@@ -258,12 +324,24 @@ svg.edges path.arrowhead{fill:var(--arrow)}
 .drawer{position:fixed;inset:0;z-index:50}
 .drawer-backdrop{position:absolute;inset:0;background:var(--backdrop)}
 .drawer-panel{position:absolute;right:0;top:0;height:100%;width:min(600px,94vw);background:var(--panel);
-  border-left:1px solid var(--border2);box-shadow:-24px 0 70px rgba(0,0,0,.55);display:flex;flex-direction:column;
-  animation:slidein .18s ease}
+  border-left:1px solid var(--border2);box-shadow:-24px 0 70px rgba(0,0,0,.55);display:flex;flex-direction:column}
+/* slide only on a genuine open — NOT when a live reconcile rebuilds the drawer */
+.drawer-panel.intro{animation:slidein .18s ease}
 @keyframes slidein{from{transform:translateX(24px);opacity:.5}to{transform:none;opacity:1}}
-.drawer-head{display:flex;align-items:flex-start;justify-content:space-between;padding:16px 18px 8px;gap:12px}
+/* Map view: dock the inspector instead of a modal — the graph stays visible and
+   pannable behind it. Narrow screens fall back to the modal (backdrop + overlay). */
+.drawer.dock{pointer-events:none}
+.drawer.dock .drawer-backdrop{display:none}
+.drawer.dock .drawer-panel{pointer-events:auto;box-shadow:-20px 0 60px rgba(0,0,0,.42)}
+@media(max-width:900px){
+  .drawer.dock{pointer-events:auto}
+  .drawer.dock .drawer-backdrop{display:block}
+}
+.mnode.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green),0 4px 18px rgba(0,0,0,.32)}
+.drawer-head{display:flex;align-items:flex-start;justify-content:space-between;padding:16px 18px 10px;gap:12px;
+  position:sticky;top:0;z-index:2;background:var(--panel);border-bottom:1px solid var(--border)}
 .drawer-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto;padding:8px 18px 30px}
-.xbtn{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;width:30px;height:30px;
+.xbtn{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;width:34px;height:34px;
   cursor:pointer;font-size:13px;flex:none}
 .xbtn:hover{color:var(--text);border-color:var(--green)}
 `;
@@ -271,11 +349,16 @@ svg.edges path.arrowhead{fill:var(--arrow)}
 // Client app. Keep it dependency-free; build DOM with a tiny h() so all user
 // data goes in via text nodes (no HTML injection).
 const APP = String.raw`
-const RUN = JSON.parse(document.getElementById('run-data').textContent);
+let RUN = JSON.parse(document.getElementById('run-data').textContent);
+// live mode: the watcher writes gen.js/data.js sidecars as the run grows; the
+// page polls them and patches the DOM IN PLACE (no reload). LIVE turns that on;
+// it flips off once the run settles (result/final), dropping the live strip.
+let LIVE = (typeof document!=='undefined') && !!(document.documentElement && document.documentElement.dataset)
+  && document.documentElement.dataset.live==='1';
 let theme='dark';
 const MODEL_PALETTES={
   dark:['#6EE7B7','#60A5FA','#A78BFA','#FBBF24','#22D3EE','#F87171'],
-  light:['#0e9d6b','#2563eb','#7c3aed','#b45309','#0891b2','#dc2626']};
+  light:['#047857','#2563eb','#7c3aed','#b45309','#0e7490','#dc2626']};
 let modelColor={};
 function computeModelColors(){const pal=MODEL_PALETTES[theme]||MODEL_PALETTES.dark;
   modelColor={}; Object.keys(RUN.models).sort().forEach((m,i)=>modelColor[m]=pal[i%pal.length]);}
@@ -288,12 +371,140 @@ const hasMetrics=()=>RUN.totals&&RUN.totals.hasMetrics;
 // live state: agents merged from the event stream as status:'running'
 const isRunning=(a)=>a&&a.status==='running';
 const elapsedOf=(a)=>a&&a.startedAt?fmtMs(Date.now()-a.startedAt):null;
+
+// ── precomputed indexes (RUN.agents is fixed for the page's lifetime) ────────
+// Built once instead of re-filtering/sorting the whole agent list on every tree,
+// map, phase-card, and metric read — cheaper for large runs and the single source
+// for phase progress/aggregate stats.
+const _agentsByPhase=new Map(), _agentByLabel=new Map();
+const _phaseStatsCache=new Map();
+function reindex(){
+  _agentsByPhase.clear(); _agentByLabel.clear(); _phaseStatsCache.clear();
+  RUN.agents.forEach((a)=>{ _agentByLabel.set(a.label,a); const arr=_agentsByPhase.get(a.phase)||[]; arr.push(a); _agentsByPhase.set(a.phase,arr); });
+  _agentsByPhase.forEach((arr)=>arr.sort((a,b)=>a.order-b.order));
+  computeModelColors();
+}
+reindex(); // rebuilt on every live data swap (RUN reassigned) so views read fresh
+const agentsInPhase=(title)=>_agentsByPhase.get(title)||[];
+const agentByLabel=(label)=>_agentByLabel.get(label);
+function phaseStats(title){
+  if(_phaseStatsCache.has(title)) return _phaseStatsCache.get(title);
+  let tokens=0,ms=0,done=0,running=0; const a=agentsInPhase(title);
+  a.forEach((x)=>{ tokens+=x.tokens||0; ms+=x.ms||0; if(isRunning(x)) running++; else done++; });
+  const s={tokens,ms,total:a.length,done,running}; _phaseStatsCache.set(title,s); return s;
+}
 function statusChip(a){
-  if(isRunning(a)){const e=elapsedOf(a);return h('span',{class:'pill run'}, h('span',{class:'dot amber'}), 'running'+(e?' · '+e:''));}
+  if(isRunning(a)){
+    const pill=h('span',{class:'pill run'}, h('span',{class:'dot amber'}), 'running');
+    if(a.startedAt) pill.append(' · ', h('span',{'data-elapsed-start':a.startedAt}, elapsedOf(a)||''));
+    return pill;
+  }
   return h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed');
 }
-const phaseTokens=(t)=>agentsInPhase(t).reduce((s,a)=>s+(a.tokens||0),0);
-const phaseMs=(t)=>agentsInPhase(t).reduce((s,a)=>s+(a.ms||0),0);
+const phaseTokens=(t)=>phaseStats(t).tokens;
+const phaseMs=(t)=>phaseStats(t).ms;
+
+// ── persisted UI state (survives the live reload) ────────────────────────────
+// Keyed by journal path so multiple run viewers don't collide. Saved on every
+// render + before unload; restored before the first render so a --watch reload
+// keeps theme/view/selection/drawer/scroll/zoom instead of resetting them.
+const STATE_KEY='cw:view:'+((RUN.sources&&RUN.sources.journal)||RUN.name||'run');
+let __restoreScroll=null;
+function saveState(){
+  try{
+    const main=document.querySelector('.main'), side=document.querySelector('.sidebar');
+    sessionStorage.setItem(STATE_KEY, JSON.stringify({
+      theme, view, sel, collapsed, expandedPhases, drawerAgent, drawerResult,
+      mapZoom, mapTx, mapTy, mapUserAdjusted,
+      mainScroll: main?main.scrollTop:0, sideScroll: side?side.scrollTop:0,
+    }));
+  }catch(e){}
+}
+function loadState(){
+  try{
+    const s=JSON.parse(sessionStorage.getItem(STATE_KEY)||'null'); if(!s) return;
+    if(s.theme) theme=s.theme;
+    if(s.view) view=s.view;
+    if(s.sel) sel=s.sel;
+    if(s.collapsed) Object.assign(collapsed,s.collapsed);
+    if(s.expandedPhases) Object.assign(expandedPhases,s.expandedPhases);
+    drawerAgent = s.drawerAgent && RUN.agents.some(a=>a.label===s.drawerAgent) ? s.drawerAgent : null;
+    drawerResult = !drawerAgent && !!s.drawerResult && RUN.result!==undefined && RUN.result!==null;
+    if(typeof s.mapZoom==='number'){ mapZoom=s.mapZoom; mapTx=s.mapTx; mapTy=s.mapTy; mapUserAdjusted=!!s.mapUserAdjusted; }
+    __restoreScroll={main:s.mainScroll||0, side:s.sideScroll||0};
+  }catch(e){}
+}
+
+// ── live tick + state-preserving reload (--watch only) ───────────────────────
+let __lastInteract=0;
+const noteInteract=()=>{ __lastInteract=Date.now(); };
+function tickLive(){
+  const now=Date.now();
+  // running-agent elapsed clocks tick in place — no page rebuild needed
+  document.querySelectorAll('[data-elapsed-start]').forEach(el=>{
+    const s=Number(el.getAttribute('data-elapsed-start')); if(s) el.textContent=fmtMs(now-s);
+  });
+  const wall=document.getElementById('live-wall');
+  if(wall && RUN.live && RUN.live.runStartedAt) wall.textContent=fmtMs(now-RUN.live.runStartedAt);
+  const since=document.getElementById('live-since'), bar=document.getElementById('livebar');
+  if(since && RUN.live && RUN.live.lastEventAt){
+    const age=now-RUN.live.lastEventAt; since.textContent=fmtMs(age)+' ago';
+    if(bar){ const running=RUN.agents.some(isRunning); bar.classList.toggle('stale', running && age>6000); }
+  }
+}
+// ── no-reload live data channel ──────────────────────────────────────────────
+// Poll a tiny gen.js sidecar; when its counter advances, pull data.js and
+// reconcile the DOM in place. Classic <script src> injection is used (not fetch)
+// because it works on file:// — the protocol the --gui monitor actually opens.
+let __lastGen=(RUN&&RUN.gen)||0;
+let __syncBusy=false, __syncOk=false, __syncMiss=0, __reloadFallback=false, __suppressMotion=false;
+function sideUrl(ext){ // "<base>.<ext>" next to this HTML, derived from our own URL
+  const p=(typeof location!=='undefined'&&location.pathname)||'';
+  return p.replace(/\.html?$/i,'')+ext+'?v='+Date.now();
+}
+function injectScript(url,onok,onerr){
+  try{
+    const s=document.createElement('script'); s.src=url; s.async=true;
+    s.onload=()=>{ if(s.remove)s.remove(); onok&&onok(); };
+    s.onerror=()=>{ if(s.remove)s.remove(); onerr&&onerr(); };
+    (document.head||document.documentElement).appendChild(s);
+  }catch(e){ onerr&&onerr(); }
+}
+// sidecars call these globals:
+if(typeof window!=='undefined'){
+  window.__wfGen=function(g){ __syncOk=true; __syncMiss=0; if(typeof g==='number'&&g>__lastGen&&!__syncBusy){ __syncBusy=true; injectScript(sideUrl('.data.js'),()=>{__syncBusy=false;},()=>{__syncBusy=false;}); } };
+  window.__wfPush=function(g,data){ __syncOk=true; if(typeof g!=='number'||g<=__lastGen||!data) return; __lastGen=g; RUN=data; reindex(); liveReconcile(); if(('result' in data)||data.final) liveSettle(); };
+}
+function liveSync(){
+  if(!LIVE||__reloadFallback) return;
+  injectScript(sideUrl('.gen.js'), null, ()=>{ if(!__syncOk && ++__syncMiss>=3){ __reloadFallback=true; scheduleLiveReloadFallback(); } });
+}
+// in-place reconcile: re-render with the fresh RUN, but suppress motion (no drawer
+// re-slide, no map re-home) and preserve scroll — so the update is invisible.
+function liveReconcile(){
+  const m=document.querySelector('.main'), sb=document.querySelector('.sidebar'), db=document.querySelector('.drawer-body');
+  __restoreScroll={ main:m?m.scrollTop:0, side:sb?sb.scrollTop:0, drawer:db?db.scrollTop:0 };
+  __suppressMotion=true;
+  try{ render(); } finally { __suppressMotion=false; }
+}
+// run finished: stop polling, drop the live strip / running styling.
+function liveSettle(){
+  if(!LIVE) return; LIVE=false; __reloadFallback=false;
+  if(typeof window!=='undefined' && window.__wfSync){ clearInterval(window.__wfSync); window.__wfSync=null; }
+  if(typeof window!=='undefined' && window.__wfTick){ clearInterval(window.__wfTick); window.__wfTick=null; }
+  __suppressMotion=true; try{ render(); } finally { __suppressMotion=false; }
+}
+// last-resort fallback if the sidecar scripts can't load (some locked-down setup):
+// the old state-preserving reload loop, so live still works — just less smoothly.
+function scheduleLiveReloadFallback(){
+  if(typeof window==='undefined'||window.__wfReload) return;
+  console&&console.warn&&console.warn('codex-workflows: live sidecars unavailable — falling back to reload');
+  window.__wfReload=setInterval(()=>{
+    if(!LIVE) return;
+    if(panning||(Date.now()-__lastInteract)<1600) return;
+    saveState(); location.reload();
+  }, 2400);
+}
 
 function h(tag, props, ...kids){
   const e=document.createElement(tag);
@@ -308,7 +519,6 @@ function h(tag, props, ...kids){
     e.append(kid.nodeType?kid:document.createTextNode(String(kid))); }
   return e;
 }
-const agentsInPhase = (title)=>RUN.agents.filter(a=>a.phase===title).sort((a,b)=>a.order-b.order);
 const finalAgent = ()=>{
   const last=RUN.phases[RUN.phases.length-1];
   const inLast=last?agentsInPhase(last.title):[];
@@ -318,6 +528,7 @@ const finalAgent = ()=>{
 
 let sel={type:'run'};
 const selKey=(s)=> s.type==='run'?'run':s.type+':'+s.id;
+const expandedPhases={}; // map phase title → true when its collapsed agents are expanded inline
 
 // ── sidebar tree ───────────────────────────────────────────────────────────
 const collapsed={};
@@ -326,13 +537,17 @@ function buildTree(){
   t.append(node({type:'run'},'▸','◆ '+RUN.name,RUN.counts.agents,'',false));
   RUN.phases.forEach((p,pi)=>{
     const kids=agentsInPhase(p.title);
+    const st=phaseStats(p.title);
     const isCol=collapsed[p.title];
-    t.append(node({type:'phase',id:p.title},isCol?'▸':'▾',p.title,kids.length,'phase',true,pi+1));
+    const pn=node({type:'phase',id:p.title},isCol?'▸':'▾',p.title,null,'phase',true,pi+1);
+    pn.append(phaseTreeMeta(st));
+    t.append(pn);
     if(!isCol){
       const wrap=h('div',{class:'children'});
       kids.forEach(a=>{
-        const n=node({type:'agent',id:a.label},'',a.label.includes(':')?a.label.split(':').slice(1).join(':')||a.label:a.label,null,'agent',false,null,isRunning(a));
-        if(a.model) n.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55',padding:'0 6px',fontSize:'10px',marginLeft:'auto'}},a.model.replace('gpt-','')));
+        const lbl=a.label.includes(':')?a.label.split(':').slice(1).join(':')||a.label:a.label;
+        const n=node({type:'agent',id:a.label},'',lbl,null,'agent',false,null,isRunning(a));
+        n.append(agentTreeMeta(a));
         wrap.append(n);
       });
       t.append(wrap);
@@ -340,10 +555,35 @@ function buildTree(){
   });
   return t;
 }
+// inline phase progress: running count, done/total, a progress bar
+function phaseTreeMeta(st){
+  const m=h('span',{class:'pmeta'});
+  if(st.running) m.append(h('span',{class:'run'},'●'+st.running));
+  m.append(h('span',{},st.done+'/'+st.total));
+  const frac=st.total?st.done/st.total:0;
+  m.append(h('span',{class:'pbar'}, h('i',{style:{width:Math.round(frac*100)+'%'}})));
+  return m;
+}
+// inline agent metrics: elapsed (running, ticks) or time, tokens, model
+function agentTreeMeta(a){
+  const m=h('span',{class:'ameta'});
+  if(isRunning(a)){ m.append(h('span',{class:'run'}, a.startedAt?h('span',{'data-elapsed-start':a.startedAt},elapsedOf(a)||'…'):'running')); }
+  else if(a.ms!=null){ m.append(h('span',{},fmtMs(a.ms))); }
+  if(a.tokens!=null) m.append(h('span',{},fmtTokens(a.tokens)));
+  if(a.model) m.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55',padding:'0 6px',fontSize:'10px'}},a.model.replace('gpt-','')));
+  return m;
+}
 function node(target,twig,labelText,count,cls,isPhase,idx,running){
+  const toggle=()=>{ collapsed[target.id]=!collapsed[target.id]; render(); };
   const n=h('div',{class:'node '+(cls||'')+(selKey(sel)===selKey(target)?' sel':''),
-    onclick:(ev)=>{ if(isPhase && ev.target.classList.contains('tw')){collapsed[target.id]=!collapsed[target.id];render();return;} select(target); }});
-  n.append(h('span',{class:'tw',onclick:isPhase?(ev)=>{ev.stopPropagation();collapsed[target.id]=!collapsed[target.id];render();}:null},twig||''));
+    role:'button', tabindex:'0',
+    onclick:(ev)=>{ if(isPhase && ev.target.classList.contains('tw')){toggle();return;} select(target); },
+    onkeydown:(ev)=>{
+      if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); select(target); }
+      else if(isPhase&&ev.key==='ArrowLeft'){ ev.preventDefault(); if(!collapsed[target.id]) toggle(); }
+      else if(isPhase&&ev.key==='ArrowRight'){ ev.preventDefault(); if(collapsed[target.id]) toggle(); }
+    }});
+  n.append(h('span',{class:'tw',onclick:isPhase?(ev)=>{ev.stopPropagation();toggle();}:null},twig||''));
   if(cls==='agent') n.append(h('span',{class:'sdot'+(running?' amber':'')}));
   if(idx) n.append(h('span',{class:'idx'},idx));
   n.append(h('span',{class:'nlabel'},labelText));
@@ -388,7 +628,7 @@ function renderValue(value,key){
       return h('ul',{class:'clean'},value.map(v=>h('li',{},renderValue(v))));
     }
     if(value.every(v=>v&&typeof v==='object'&&!Array.isArray(v))) return renderTable(value);
-    return h('div',{},value.map(v=>h('div',{class:'card',style:{margin:'8px 0'}},renderValue(v))));
+    return h('div',{class:'subitems'},value.map(v=>h('div',{class:'subitem'},renderValue(v))));
   }
   // object
   return renderObject(value);
@@ -403,15 +643,19 @@ function renderObject(obj){
   return kv;
 }
 
+const TABLE_CAP=100; // initial rows; the rest reveal behind "Show all"
 function renderTable(rows){
   const cols=[]; rows.forEach(r=>Object.keys(r).forEach(k=>{if(!cols.includes(k))cols.push(k);}));
   // keep big text columns out of the table; render them under each row instead
   const longCols=cols.filter(c=>rows.some(r=>typeof r[c]==='string'&&r[c].length>90));
   const tblCols=cols.filter(c=>!longCols.includes(c));
   const wrap=h('div',{});
+  const tw=h('div',{class:'tablewrap'});
   const t=h('table',{class:'t'});
-  t.append(h('tr',{},tblCols.map(c=>h('th',{},c))));
-  rows.forEach(r=>{
+  t.append(h('thead',{}, h('tr',{},tblCols.map(c=>h('th',{scope:'col'},c)))));
+  const tbody=h('tbody',{});
+  t.append(tbody);
+  const addRow=(r)=>{
     const tr=h('tr',{});
     tblCols.forEach(c=>{
       const v=r[c];
@@ -422,16 +666,35 @@ function renderTable(rows){
       else if(typeof v==='number'){ tr.append(h('td',{class:'num'},String(v))); }
       else { tr.append(h('td',{},renderValue(v,c))); }
     });
-    t.append(tr);
+    tbody.append(tr);
     if(longCols.length){
       const tr2=h('tr',{});
       const td=h('td',{colspan:tblCols.length,style:{paddingTop:'2px',paddingBottom:'12px'}});
       longCols.forEach(c=>{ if(r[c]!=null&&r[c]!==''){ td.append(h('div',{class:'k',style:{marginTop:'4px'}},c)); td.append(h('div',{class:'prose'},String(r[c]))); }});
-      tr2.append(td); t.append(tr2);
+      tr2.append(td); tbody.append(tr2);
     }
-  });
-  wrap.append(t);
+  };
+  rows.slice(0,TABLE_CAP).forEach(addRow);
+  tw.append(t); wrap.append(tw);
+  if(rows.length>TABLE_CAP){
+    const btn=h('button',{class:'showall'},'Show all '+rows.length+' rows');
+    btn.addEventListener('click',()=>{ rows.slice(TABLE_CAP).forEach(addRow); btn.remove(); });
+    wrap.append(btn);
+  }
   return wrap;
+}
+
+// running agent with no result yet — a pending skeleton instead of "(no result)"
+function pendingResult(a){
+  const c=h('div',{class:'card'});
+  const row=h('div',{class:'metarow'});
+  row.append(statusChip(a));
+  if(a.model) row.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
+  if(a.effort) row.append(h('span',{class:'pill'},'effort · '+a.effort));
+  row.append(h('span',{class:'pill'},'phase · '+a.phase));
+  c.append(row);
+  c.append(h('div',{class:'prose muted',style:{marginTop:'10px'}},'Running — waiting for this agent’s result to land in the journal…'));
+  return c;
 }
 
 // one-line summary of an agent result, for cards/sidebar
@@ -446,24 +709,31 @@ function summarize(r){
 function renderMain(){
   if(sel.type==='run') return renderRun();
   if(sel.type==='phase') return renderPhase(RUN.phases.find(p=>p.title===sel.id));
-  if(sel.type==='agent') return renderAgent(RUN.agents.find(a=>a.label===sel.id));
+  if(sel.type==='agent') return renderAgent(agentByLabel(sel.id));
   return h('div',{});
 }
 
 function renderRun(){
   const m=h('div',{});
   if(RUN.description) m.append(h('div',{class:'sub',style:{maxWidth:'90ch',marginBottom:'4px'}},RUN.description));
-  const fa=finalAgent();
-  if(fa&&fa.result){
-    const r=fa.result;
-    m.append(h('h2',{class:'sec'},'Outcome'));
-    const hero=h('div',{class:'card hero'});
-    if(r.recommended_direction) hero.append(h('div',{class:'title-lg'},r.recommended_direction));
-    if(r.hero&&r.hero.headline){ hero.append(h('div',{style:{fontSize:'16px',fontWeight:600,marginTop:'4px'}},r.hero.headline));
-      if(r.hero.subhead) hero.append(h('div',{class:'sub'},r.hero.subhead)); }
-    if(r.why_this_wins) hero.append(h('div',{class:'prose',style:{marginTop:'10px'}},r.why_this_wins));
-    hero.append(h('div',{style:{marginTop:'10px'}}, h('a',{href:'#',onclick:(e)=>{e.preventDefault();select({type:'agent',id:fa.label});}}, 'Open full result → '+fa.label)));
-    m.append(hero);
+  if(hasResult()){
+    // the workflow's actual return value — rendered inline, no guessing
+    m.append(h('h2',{class:'sec'},'Result'));
+    const r=RUN.result;
+    m.append(h('div',{class:'card hero'}, (r&&typeof r==='object')?renderValue(r):h('div',{class:'prose'},String(r))));
+  } else {
+    const fa=finalAgent();
+    if(fa&&fa.result){
+      const r=fa.result;
+      m.append(h('h2',{class:'sec'},'Outcome'));
+      const hero=h('div',{class:'card hero'});
+      if(r.recommended_direction) hero.append(h('div',{class:'title-lg'},r.recommended_direction));
+      if(r.hero&&r.hero.headline){ hero.append(h('div',{style:{fontSize:'16px',fontWeight:600,marginTop:'4px'}},r.hero.headline));
+        if(r.hero.subhead) hero.append(h('div',{class:'sub'},r.hero.subhead)); }
+      if(r.why_this_wins) hero.append(h('div',{class:'prose',style:{marginTop:'10px'}},r.why_this_wins));
+      hero.append(h('div',{style:{marginTop:'10px'}}, h('a',{href:'#',onclick:(e)=>{e.preventDefault();select({type:'agent',id:fa.label});}}, 'Open full result → '+fa.label)));
+      m.append(hero);
+    }
   }
   // phases
   m.append(h('h2',{class:'sec'},'Phases'));
@@ -536,6 +806,10 @@ function renderAgent(a){
   chips.append(statusChip(a));
   m.append(chips);
   m.append(h('h2',{class:'sec'},'Result'));
+  if(isRunning(a) && a.result==null){
+    m.append(pendingResult(a));
+    return m; // no raw-json block for an agent that hasn't produced output yet
+  }
   if(a.result&&typeof a.result==='object'){
     m.append(h('div',{class:'card'},renderValue(a.result)));
   } else {
@@ -549,7 +823,8 @@ function renderAgent(a){
 }
 
 // ── view toggle, execution map, drawer, frame ───────────────────────────────
-let view='map', drawerAgent=null;
+let view='map', drawerAgent=null, drawerResult=false;
+const hasResult=()=>RUN.result!==undefined && RUN.result!==null;
 let mapZoom=1, mapTx=0, mapTy=0, mapUserAdjusted=false, panning=false;
 let mapEls={orch:null,result:null,phases:[],barriers:[]};
 let edgePaths=[];
@@ -582,6 +857,21 @@ function renderHeader(){
   }
   Object.entries(RUN.models).forEach(([mm,ct])=>meta.append(h('span',{class:'chip',style:{color:modelColor[mm],borderColor:modelColor[mm]+'55'}},mm+' ×'+ct)));
   head.append(meta);
+  // live status strip: wall-clock, last-update age (stale flag), running count —
+  // only while the run is live or still has in-flight agents.
+  const nRunning=RUN.agents.filter(isRunning).length;
+  if(LIVE || nRunning){
+    const lb=h('div',{class:'livebar',id:'livebar'});
+    lb.append(h('span',{style:{display:'inline-flex',alignItems:'center',gap:'6px'}},
+      h('span',{class:'livedot'}), h('span',{style:{color:'var(--amber)',fontWeight:700,letterSpacing:'.08em'}}, LIVE?'LIVE':'RUNNING')));
+    if(RUN.live && RUN.live.runStartedAt)
+      lb.append(h('span',{}, h('span',{class:'lk'},'elapsed'), h('span',{class:'lv',id:'live-wall'}, fmtMs(Date.now()-RUN.live.runStartedAt)||'—')));
+    if(RUN.live && RUN.live.lastEventAt)
+      lb.append(h('span',{class:'stale-flag'}, h('span',{class:'lk'},'updated'), h('span',{class:'lv',id:'live-since'}, fmtMs(Date.now()-RUN.live.lastEventAt)+' ago')));
+    lb.append(h('span',{}, h('span',{class:'lk'},'running'), h('span',{class:'lv'}, String(nRunning))));
+    if(LIVE) lb.append(h('span',{class:'lk',style:{marginLeft:'auto'}},'auto-refresh on'));
+    head.append(lb);
+  }
   return head;
 }
 function renderFooter(){
@@ -596,10 +886,21 @@ function renderFooter(){
 function agentNode(a){
   const run=isRunning(a), el=elapsedOf(a);
   const tip=(a.model?'['+a.model+(a.effort?' · '+a.effort:'')+'] ':'')+(run?('running'+(el?' '+el:'')+' · '):(a.tokens!=null?fmtTokens(a.tokens)+' tok · ':''))+(summarize(a.result)||a.label);
-  const n=h('div',{class:'mnode agent'+(run?' running':''),title:tip,onclick:()=>openDrawer(a.label)});
+  const open=()=>openDrawer(a.label);
+  const n=h('div',{class:'mnode agent'+(run?' running':'')+(drawerAgent===a.label?' selected':''),title:tip,role:'button',tabindex:'0',
+    'aria-label':'Agent '+a.label+(run?', running':', completed')+(a.ms!=null?', '+fmtMs(a.ms):''),
+    onclick:open, onkeydown:(e)=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();open();} }});
   n.append(h('span',{class:'msdot'+(run?' amber':'')}));
   n.append(h('span',{class:'mlabel'}, a.label.includes(':')?a.label.split(':').slice(1).join(':'):a.label));
   if(a.model) n.append(h('span',{class:'chip mmodel',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model.replace('gpt-','')));
+  // node footer: live elapsed (ticks) for running, else time + tokens
+  const stats=h('div',{class:'mstats'}); let hasStat=false;
+  if(run){ stats.append(h('span',{class:'st run'}, a.startedAt?h('span',{'data-elapsed-start':a.startedAt}, el||'…'):'running')); hasStat=true; }
+  else {
+    if(a.ms!=null){ stats.append(h('span',{class:'st'},fmtMs(a.ms))); hasStat=true; }
+    if(a.tokens!=null){ stats.append(h('span',{},fmtTokens(a.tokens))); hasStat=true; }
+  }
+  if(hasStat) n.append(stats);
   return n;
 }
 function orchRow(){
@@ -608,23 +909,53 @@ function orchRow(){
   mapEls.orch=node;
   return h('div',{class:'mrow orch'}, h('div',{class:'mgutter'}), h('div',{class:'mcenter'}, node), h('div',{class:'mgutter'}));
 }
-const MAP_CAP=12; // max agent nodes drawn per phase row; the rest collapse to "+N more"
+const MAP_CAP=12; // collapse a phase's agent row beyond this many nodes
 function phaseRow(p,i){
   const all=agentsInPhase(p.title);
-  const ags=all.length>MAP_CAP?all.slice(0,MAP_CAP-1):all;
+  const st=phaseStats(p.title);
+  const expanded=expandedPhases[p.title];
+  // running-aware visible set: never fold an in-flight agent into the aggregate.
+  // Show running first, then earliest by order up to the cap; the rest collapse.
+  let visible=all, hidden=[];
+  if(all.length>MAP_CAP && !expanded){
+    const slots=Math.max(1, MAP_CAP-1);
+    const pick=new Set(all.filter(isRunning).map(a=>a.label));
+    for(const a of all){ if(pick.size>=slots) break; pick.add(a.label); }
+    visible=all.filter(a=>pick.has(a.label));
+    hidden=all.filter(a=>!pick.has(a.label));
+  }
   const gut=h('div',{class:'mgutter left'},
     h('div',{class:'plabel'}, h('span',{class:'pidx'},(i+1)), p.title),
     p.detail?h('div',{class:'pdetail'},p.detail):null,
-    h('div',{class:'pcount'},all.length+(all.length===1?' agent':' parallel')));
-  if(hasMetrics()){const pt=phaseTokens(p.title),pm=phaseMs(p.title);const parts=[pt?fmtTokens(pt)+' tok':null,pm?fmtMs(pm):null].filter(Boolean);
+    h('div',{class:'pcount'}, st.running ? st.done+'/'+st.total+' done · '+st.running+' running' : all.length+(all.length===1?' agent':' parallel')));
+  if(hasMetrics()){const parts=[st.tokens?fmtTokens(st.tokens)+' tok':null,st.ms?fmtMs(st.ms):null].filter(Boolean);
     if(parts.length) gut.append(h('div',{class:'pcount'},parts.join(' · ')));}
   const nodes=h('div',{class:'mnodes'}); const els=[];
-  ags.forEach(a=>{const n=agentNode(a); els.push(n); nodes.append(n);});
-  if(all.length>MAP_CAP){
-    const more=h('div',{class:'mnode more',title:'open this phase in Tree view to see all '+all.length,
-      onclick:()=>{view='tree';drawerAgent=null;select({type:'phase',id:p.title});}},
-      h('span',{class:'mlabel'},'+ '+(all.length-(MAP_CAP-1))+' more'));
-    els.push(more); nodes.append(more);
+  visible.forEach(a=>{const n=agentNode(a); els.push(n); nodes.append(n);});
+  if(hidden.length){
+    // aggregate bucket (not a fake agent): hidden count + running + tokens + model mix
+    const hidRunning=hidden.filter(isRunning).length;
+    const hidTokens=hidden.reduce((s,a)=>s+(a.tokens||0),0);
+    const mods={}; hidden.forEach(a=>{if(a.model)mods[a.model]=(mods[a.model]||0)+1;});
+    const expand=()=>{ expandedPhases[p.title]=true; render(); };
+    const agg=h('div',{class:'mnode more',role:'button',tabindex:'0',title:'show '+hidden.length+' more agents in '+p.title,
+      'aria-label':hidden.length+' more agents in '+p.title+(hidRunning?', '+hidRunning+' running':'')+'. Activate to expand.',
+      onclick:expand, onkeydown:(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();expand();}}},
+      h('span',{class:'mlabel'},'+ '+hidden.length+' more'));
+    const info=h('div',{class:'magg'});
+    if(hidRunning) info.append(h('span',{class:'run'},hidRunning+' running'));
+    if(hidTokens) info.append(h('span',{},fmtTokens(hidTokens)+' tok'));
+    if(Object.keys(mods).length){ const chips=h('div',{class:'maggchips'});
+      Object.entries(mods).forEach(([mm,ct])=>chips.append(h('span',{class:'chip mmodel',style:{color:modelColor[mm],borderColor:modelColor[mm]+'55'}},mm.replace('gpt-','')+(ct>1?'×'+ct:''))));
+      info.append(chips); }
+    agg.append(info);
+    els.push(agg); nodes.append(agg);
+  } else if(expanded && all.length>MAP_CAP){
+    const collapse=()=>{ expandedPhases[p.title]=false; render(); };
+    const agg=h('div',{class:'mnode more',role:'button',tabindex:'0',title:'collapse '+p.title,'aria-label':'Collapse '+p.title,
+      onclick:collapse, onkeydown:(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();collapse();}}},
+      h('span',{class:'mlabel'},'− collapse'));
+    els.push(agg); nodes.append(agg);
   }
   mapEls.phases.push(els);
   return h('div',{class:'mrow phase'}, gut, nodes, h('div',{class:'mgutter'}));
@@ -635,11 +966,23 @@ function barrierRow(k){
   return h('div',{class:'mrow barrier'}, h('div',{class:'mgutter'}), h('div',{class:'mcenter'},bar), h('div',{class:'mgutter'}));
 }
 function resultRow(){
-  const fa=finalAgent();
-  const node=h('div',{class:'mnode endpoint result-node',onclick:fa?function(){openDrawer(fa.label);}:null},
-    h('span',{class:'mlabel'},'result'), h('span',{class:'mendsub'},'returns when done'));
+  // Prefer the workflow's actual persisted return value; fall back to the
+  // heuristic "final agent" only when no result was persisted (older/live runs).
+  let open=null, sub='returns when done', note=null;
+  if(hasResult()){
+    open=openResultDrawer; sub='workflow output';
+    const snip=summarize(RUN.result)||(typeof RUN.result==='string'?RUN.result:null);
+    if(snip) note=h('div',{class:'mnote'}, String(snip).slice(0,240));
+  } else {
+    const fa=finalAgent();
+    if(fa){ open=()=>openDrawer(fa.label); sub='final agent';
+      if(fa.result&&fa.result.recommended_direction) note=h('div',{class:'mnote'},fa.result.recommended_direction); }
+  }
+  const node=h('div',{class:'mnode endpoint result-node'+(drawerResult?' selected':''),role:open?'button':null,tabindex:open?'0':null,
+    'aria-label':open?'Workflow result':null,onclick:open,
+    onkeydown:open?(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}}:null},
+    h('span',{class:'mlabel'},'result'), h('span',{class:'mendsub'},sub));
   mapEls.result=node;
-  const note=fa&&fa.result&&fa.result.recommended_direction?h('div',{class:'mnote'},fa.result.recommended_direction):null;
   return h('div',{class:'mrow result'}, h('div',{class:'mgutter'}), h('div',{class:'mcenter'},node,note), h('div',{class:'mgutter'}));
 }
 function renderMapFrame(){
@@ -662,15 +1005,17 @@ function renderMapFrame(){
     h('button',{class:'zb',title:'Zoom in',onclick:(e)=>{e.stopPropagation();zoomAt(1.2);}},'+'),
     h('button',{class:'zb fit',title:'Fit & center  (F)',onclick:(e)=>{e.stopPropagation();fitMap();}},'⤢ Fit')));
   // wheel zoom toward cursor; drag empty space to pan
-  frame.addEventListener('wheel',(e)=>{ e.preventDefault(); const vp=frame.getBoundingClientRect();
+  frame.addEventListener('wheel',(e)=>{ e.preventDefault(); noteInteract(); const vp=frame.getBoundingClientRect();
     zoomAt(e.deltaY<0?1.12:0.89, e.clientX-vp.left, e.clientY-vp.top); }, {passive:false});
   frame.addEventListener('pointerdown',(e)=>{
     if(e.target&&e.target.closest&&e.target.closest('.mnode,.mapctl,.drawer')) return;
+    noteInteract();
     panning=true; const sx=e.clientX, sy=e.clientY, stx=mapTx, sty=mapTy; frame.className='mapframe grabbing';
     const mv=(ev)=>{ if(!panning)return; mapTx=stx+(ev.clientX-sx); mapTy=sty+(ev.clientY-sy); mapUserAdjusted=true; applyTransform(); };
     const up=()=>{ panning=false; frame.className='mapframe'; window.removeEventListener('pointermove',mv); window.removeEventListener('pointerup',up); };
     window.addEventListener('pointermove',mv); window.addEventListener('pointerup',up); });
   if(drawerAgent) frame.append(buildDrawer(drawerAgent));
+  else if(drawerResult) frame.append(buildResultDrawer());
   return frame;
 }
 function drawEdges(){
@@ -684,15 +1029,20 @@ function drawEdges(){
   edgePaths.forEach(p=>p.remove()); edgePaths=[];
   const center=(el,side)=>{const r=el.getBoundingClientRect();
     return {x:(r.left-cr.left+r.width/2)/scale, y:((side==='top'?r.top:r.bottom)-cr.top)/scale};};
-  const add=(a,b)=>{const dy=Math.max(30,(b.y-a.y)*0.5);
+  const add=(a,b,cls)=>{const dy=Math.max(30,(b.y-a.y)*0.5);
     const d='M'+a.x+' '+a.y+' C '+a.x+' '+(a.y+dy)+' '+b.x+' '+(b.y-dy)+' '+b.x+' '+b.y;
-    const p=svgEl('path',{class:'edge',d:d,'marker-end':'url(#arrow)'}); svg.append(p); edgePaths.push(p);};
+    const p=svgEl('path',{class:'edge'+(cls?' '+cls:''),d:d,'marker-end':'url(#arrow)'}); svg.append(p); edgePaths.push(p);};
+  // classify edges by the downstream phase's live state: amber while a phase is
+  // running, dashed/dim for a phase that hasn't started any agent yet.
+  const edgeCls=(k)=>{ const t=RUN.phases[k]&&RUN.phases[k].title; if(t==null) return '';
+    const st=phaseStats(t); if(st.running>0) return 'live'; if((st.done+st.running)===0) return 'pending'; return ''; };
   const ph=mapEls.phases;
-  (ph[0]||[]).forEach(n=>add(center(mapEls.orch,'bottom'),center(n,'top')));
+  (ph[0]||[]).forEach(n=>add(center(mapEls.orch,'bottom'),center(n,'top'),edgeCls(0)));
   for(let k=0;k<ph.length-1;k++){ const bar=mapEls.barriers[k]; if(!bar)continue;
-    ph[k].forEach(n=>add(center(n,'bottom'),center(bar,'top')));
-    ph[k+1].forEach(n=>add(center(bar,'bottom'),center(n,'top'))); }
-  if(mapEls.result)(ph[ph.length-1]||[]).forEach(n=>add(center(n,'bottom'),center(mapEls.result,'top')));
+    const cIn=edgeCls(k), cOut=edgeCls(k+1);
+    ph[k].forEach(n=>add(center(n,'bottom'),center(bar,'top'),cIn));
+    ph[k+1].forEach(n=>add(center(bar,'bottom'),center(n,'top'),cOut)); }
+  if(mapEls.result)(ph[ph.length-1]||[]).forEach(n=>add(center(n,'bottom'),center(mapEls.result,'top'),edgeCls(ph.length-1)));
 }
 
 // ── zoom / pan ──────────────────────────────────────────────────────────────
@@ -731,13 +1081,13 @@ function zoomAt(factor,cx,cy){
 
 // detail drawer (progressive disclosure on a node)
 function buildDrawer(label){
-  const a=RUN.agents.find(x=>x.label===label); if(!a) return h('div',{});
-  const back=h('div',{class:'drawer',id:'drawer'});
+  const a=agentByLabel(label); if(!a) return h('div',{});
+  const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
   back.append(h('div',{class:'drawer-backdrop',onclick:closeDrawer}));
-  const panel=h('div',{class:'drawer-panel'});
+  const panel=h('div',{class:'drawer-panel'+(__suppressMotion?'':' intro'),role:'dialog','aria-modal':'true','aria-label':'Agent '+a.label});
   panel.append(h('div',{class:'drawer-head'},
     h('div',{}, h('div',{class:'crumbs'},a.phase), h('div',{class:'title-lg',style:{fontSize:'17px'}},a.label)),
-    h('button',{class:'xbtn',onclick:closeDrawer},'✕')));
+    h('button',{class:'xbtn',id:'drawer-close','aria-label':'Close',onclick:closeDrawer},'✕')));
   const chips=h('div',{class:'metarow',style:{padding:'0 18px 4px'}});
   if(a.model) chips.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
   if(a.effort) chips.append(h('span',{class:'pill'},'effort · '+a.effort));
@@ -747,16 +1097,53 @@ function buildDrawer(label){
   chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerAgent=null;select({type:'agent',id:label});}},'open in tree ↗'));
   panel.append(chips);
   const body=h('div',{class:'drawer-body'});
-  if(a.result&&typeof a.result==='object') body.append(renderValue(a.result));
-  else body.append(h('div',{class:'prose'},a.result==null?'(no result)':String(a.result)));
-  const det=h('details',{class:'raw'}); det.append(h('summary',{},'raw json'), h('pre',{class:'json'},JSON.stringify(a.result,null,2)));
+  if(isRunning(a) && a.result==null){
+    body.append(pendingResult(a));
+  } else {
+    if(a.result&&typeof a.result==='object') body.append(renderValue(a.result));
+    else body.append(h('div',{class:'prose'},a.result==null?'(no result)':String(a.result)));
+    const det=h('details',{class:'raw'}); det.append(h('summary',{},'raw json'), h('pre',{class:'json'},JSON.stringify(a.result,null,2)));
+    body.append(det);
+  }
+  panel.append(body); back.append(panel);
+  return back;
+}
+// result drawer: render the workflow's actual return value (the honest output)
+function buildResultDrawer(){
+  const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
+  back.append(h('div',{class:'drawer-backdrop',onclick:closeDrawer}));
+  const panel=h('div',{class:'drawer-panel'+(__suppressMotion?'':' intro'),role:'dialog','aria-modal':'true','aria-label':'Workflow result'});
+  panel.append(h('div',{class:'drawer-head'},
+    h('div',{}, h('div',{class:'crumbs'},RUN.name), h('div',{class:'title-lg',style:{fontSize:'17px'}},'workflow result')),
+    h('button',{class:'xbtn',id:'drawer-close','aria-label':'Close',onclick:closeDrawer},'✕')));
+  const body=h('div',{class:'drawer-body'});
+  const r=RUN.result;
+  if(r&&typeof r==='object') body.append(renderValue(r));
+  else body.append(h('div',{class:'prose'}, r==null?'(empty)':String(r)));
+  const det=h('details',{class:'raw'}); det.append(h('summary',{},'raw json'), h('pre',{class:'json'},JSON.stringify(r,null,2)));
   body.append(det); panel.append(body); back.append(panel);
   return back;
 }
-function openDrawer(label){ closeDrawer(); drawerAgent=label; const f=document.getElementById('mapframe'); if(f) f.append(buildDrawer(label)); }
-function closeDrawer(){ drawerAgent=null; const d=document.getElementById('drawer'); if(d&&d.remove) d.remove(); }
+let __drawerReturnFocus=null;
+function focusClose(){ if(typeof requestAnimationFrame!=='undefined') requestAnimationFrame(()=>{ const x=document.getElementById('drawer-close'); if(x&&x.focus) x.focus(); }); }
+function openDrawer(label){
+  __drawerReturnFocus=document.activeElement; drawerAgent=label; drawerResult=false;
+  render(); // re-render so the node shows selected + the dock mounts consistently
+  focusClose(); saveState();
+}
+function openResultDrawer(){
+  __drawerReturnFocus=document.activeElement; drawerResult=true; drawerAgent=null;
+  render(); focusClose(); saveState();
+}
+function closeDrawer(){
+  const had=drawerAgent||drawerResult; if(!had) return; drawerAgent=null; drawerResult=false;
+  render();
+  if(__drawerReturnFocus&&__drawerReturnFocus.focus){ try{__drawerReturnFocus.focus();}catch(e){} } __drawerReturnFocus=null;
+  saveState();
+}
 
 function render(){
+  const motionSuppressed=__suppressMotion; // capture now — the map rAF runs after the reconcile resets it
   if(typeof document!=='undefined'&&document.body) document.body.className = theme==='light'?'theme-light':'';
   computeModelColors();
   const app=document.getElementById('app'); app.textContent='';
@@ -768,9 +1155,22 @@ function render(){
     app.append(body);
   }
   app.append(renderFooter());
+  // restore scroll after layout (one-shot — after a live reconcile or fallback
+  // reload), then snapshot current state for the fallback reload path.
+  requestAnimationFrame(()=>{
+    if(__restoreScroll){
+      const main=document.querySelector('.main'), side=document.querySelector('.sidebar'), db=document.querySelector('.drawer-body');
+      if(main) main.scrollTop=__restoreScroll.main; if(side) side.scrollTop=__restoreScroll.side;
+      if(db && __restoreScroll.drawer!=null) db.scrollTop=__restoreScroll.drawer;
+      __restoreScroll=null;
+    }
+    saveState();
+  });
   if(view==='map'){
     requestAnimationFrame(()=>requestAnimationFrame(()=>{
-      if(mapUserAdjusted) applyTransform(); else homeView();   // readable 100%, centered, on entry
+      // a live reconcile must NOT re-home the camera (that would look like a jump);
+      // keep the exact transform and just reflow the edges to the new node layout.
+      if(mapUserAdjusted||motionSuppressed) applyTransform(); else homeView();
       drawEdges();
     }));
     if(typeof window!=='undefined' && !window.__wfResize){ window.__wfResize=true;
@@ -784,40 +1184,78 @@ function render(){
     }
   }
 }
-render();
+
+// one-time global wiring: Escape closes the drawer (any view), keyboard/pointer
+// count as interaction (used only by the reload fallback), unload snapshots state.
+// Then kick off the live elapsed tick + the no-reload sidecar sync loop.
+function initLive(){
+  if(typeof window==='undefined'||window.__wfInit) return; window.__wfInit=true;
+  window.addEventListener('keydown',(e)=>{ noteInteract();
+    if(e.key==='Escape'&&(drawerAgent||drawerResult)){ e.preventDefault(); closeDrawer(); } });
+  window.addEventListener('pointerdown',noteInteract,true);
+  window.addEventListener('pagehide',saveState);
+  window.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') saveState(); });
+  if(LIVE){
+    if(!window.__wfTick) window.__wfTick=setInterval(tickLive,1000); // elapsed clocks (no re-render)
+    if(!window.__wfSync) window.__wfSync=setInterval(liveSync,1200); // pull fresh data, reconcile in place
+    liveSync();                                                      // kick immediately
+  }
+}
+// live-debug seam: type __wfState() in the console to see the current live state.
+if(typeof window!=='undefined') window.__wfState=()=>({gen:__lastGen, live:LIVE, settled:!LIVE, agents:RUN.agents.length, running:RUN.agents.filter(isRunning).length, name:RUN.name});
+loadState(); render(); initLive();
 `;
 
 // ── emit (CSS + APP are now initialized) ─────────────────────────────────────
 const outPath =
   (opts.outPath && resolve(opts.outPath)) ||
   join(runDir, basename(journalPath).replace(/\.jsonl$/, "") + ".run.html");
-writeFileSync(outPath, renderHtml(buildModel(), opts.watch));
-console.log(outPath);
 
-if (opts.open) {
-  const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  execFile(opener, [outPath], () => {});
-}
+if (opts.settle) {
+  // Final render: a static (data-live="0") HTML with data fully inlined, PLUS a
+  // final sidecar carrying final:true so any still-open live page reconciles to
+  // the finished state and stops polling. Then exit.
+  const model = buildModel();
+  model.final = true;
+  const gen = nowGen();
+  writeAtomic(outPath, renderHtml(model, false, gen));
+  writeSidecars(outPath, model, gen);
+  console.log(outPath);
+} else {
+  const gen0 = nowGen();
+  writeAtomic(outPath, renderHtml(buildModel(), opts.watch, gen0));
+  if (opts.watch) writeSidecars(outPath, buildModel(), gen0);
+  console.log(outPath);
 
-// --watch: rebuild the HTML as the journal grows, so an open tab tracks a live
-// run (the page auto-refreshes every 2s). Runs until Ctrl-C.
-if (opts.watch) {
-  console.error(`↻ watching ${journalPath} — rebuilding ${outPath} on change (Ctrl-C to stop)`);
-  let lastSize = -1;
-  const eventsPath = eventsPathFor(journalPath);
-  const sz = (p) => { try { return statSync(p).size; } catch { return 0; } };
-  const tick = () => {
-    // watch the journal (completed agents) AND the events sidecar (running agents)
-    const size = sz(journalPath) + sz(eventsPath);
-    if (size !== lastSize) {
-      lastSize = size;
-      try {
-        writeFileSync(outPath, renderHtml(buildModel(), true));
-        console.error(`  · rebuilt (${new Date().toISOString()}) — ${size} bytes journal`);
-      } catch (e) {
-        console.error(`  ! rebuild failed: ${e?.message ?? e}`);
+  if (opts.open) {
+    const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+    execFile(opener, [outPath], () => {});
+  }
+
+  // --watch: as the journal/events grow, rewrite the data sidecars (and the HTML,
+  // for a fresh manual reload). The OPEN page never reloads — it pulls the
+  // sidecars and patches the DOM in place. Runs until Ctrl-C.
+  if (opts.watch) {
+    console.error(`↻ watching ${journalPath} — live-updating ${outPath} on change (Ctrl-C to stop)`);
+    let lastSig = "";
+    const eventsPath = eventsPathFor(journalPath);
+    // size+mtime, not size alone: a truncate/rewrite/resume can keep byte count
+    // stable while content changes, and the events sidecar is rewritten in place.
+    const sig = (p) => { try { const s = statSync(p); return s.size + ":" + s.mtimeMs; } catch { return "0:0"; } };
+    const tick = () => {
+      const cur = sig(journalPath) + "|" + sig(eventsPath);
+      if (cur !== lastSig) {
+        lastSig = cur;
+        try {
+          const model = buildModel();
+          const gen = nowGen();
+          writeSidecars(outPath, model, gen);              // the no-reload update channel
+          writeAtomic(outPath, renderHtml(model, true, gen)); // keep HTML fresh for a manual reload
+        } catch (e) {
+          console.error(`  ! update failed: ${e?.message ?? e}`);
+        }
       }
-    }
-  };
-  setInterval(tick, 1500);
+    };
+    setInterval(tick, 1500);
+  }
 }

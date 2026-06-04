@@ -13,7 +13,7 @@
   "bugs": "https://github.com/scasella/claude-dynamic-workflows-codex/issues",
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "node runner/test/offline.js && node runner/test/view-run.test.js && node runner/test/map-run.test.js",
+    "test": "node runner/test/offline.js && node runner/test/view-run.test.js && node runner/test/view-run.live.test.js && node runner/test/map-run.test.js",
     "doctor": "node runner/test/handshake.js",
     "demo": "node runner/bin/view-run.js examples/demo --open",
     "demo:live": "node runner/bin/demo-live.js",

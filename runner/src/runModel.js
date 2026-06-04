@@ -27,7 +27,11 @@ export function locateRun({ target, journal, script } = {}) {
       }
     }
   }
-  if (!journalPath || !existsSync(journalPath)) {
+  // Allow attaching before the first agent completes: the journal file doesn't
+  // exist yet, but the events sidecar (running agents) does. Live viewers can
+  // render from events alone until the journal appears.
+  const eventsExist = journalPath && existsSync(eventsPathFor(journalPath));
+  if (!journalPath || (!existsSync(journalPath) && !eventsExist)) {
     return { journalPath: null, scriptPath: null, runDir, error: `No journal found. Looked at: ${journalPath ?? target}` };
   }
   runDir = runDir ?? dirname(dirname(journalPath)); // .workflow-journal/<f> → run dir
@@ -89,6 +93,18 @@ export function eventsPathFor(journalPath) {
   return journalPath.replace(/\.jsonl$/i, "") + ".events.jsonl";
 }
 
+// The workflow's actual return value, persisted by the runner next to the journal
+// so the viewer can show the honest output instead of guessing a "final" agent.
+export function resultPathFor(journalPath) {
+  return journalPath.replace(/\.jsonl$/i, "") + ".result.json";
+}
+
+export function readResult(journalPath) {
+  const p = resultPathFor(journalPath);
+  if (!existsSync(p)) return undefined;
+  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; }
+}
+
 export function readEvents(journalPath) {
   const p = eventsPathFor(journalPath);
   if (!existsSync(p)) return null;
@@ -131,8 +147,13 @@ export function liveState(events) {
 
 export function buildRunModel({ journalPath, scriptPath = null, runDir = null, title = null, generatedAt = null }) {
   // journal is append-only; keep the latest entry per key (resume can re-record).
+  // The journal file may not exist yet — a live viewer can attach before the
+  // first agent completes (the runner creates it lazily on the first result),
+  // in which case the model is built from the event stream alone.
   const byKey = new Map();
-  for (const line of readFileSync(journalPath, "utf8").trim().split("\n")) {
+  let journalText = "";
+  try { journalText = readFileSync(journalPath, "utf8"); } catch {}
+  for (const line of journalText.trim().split("\n")) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);
@@ -211,6 +232,7 @@ export function buildRunModel({ journalPath, scriptPath = null, runDir = null, t
     models,
     totals: { tokens: totalTokens, ms: totalMs, hasMetrics },
     counts: { phases: phaseOrder.length, agents: agents.length },
+    result: readResult(journalPath), // the workflow's actual return value, if the runner persisted it
     sources: { journal: journalPath, script: scriptPath && existsSync(scriptPath) ? scriptPath : null, runDir },
     generatedAt: generatedAt || new Date().toISOString(),
   };

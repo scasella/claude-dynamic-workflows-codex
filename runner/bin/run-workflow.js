@@ -17,7 +17,7 @@ import { runWorkflowFile } from "../src/runWorkflow.js";
 import { getClient, shutdownClient } from "../src/codexAgent.js";
 import { pickFrontier } from "../src/modelMap.js";
 import { Journal } from "../src/journal.js";
-import { eventsPathFor } from "../src/runModel.js";
+import { eventsPathFor, resultPathFor } from "../src/runModel.js";
 
 const BIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -320,6 +320,11 @@ try {
   });
   console.error("\n─── result ───");
   console.log(JSON.stringify(result ?? null, null, 2));
+  // Persist the actual return value next to the journal so the viewer's result
+  // node shows the honest workflow output (not a heuristic "final" agent).
+  if (journalPath && result !== undefined) {
+    try { writeFileSync(resultPathFor(journalPath), JSON.stringify(result ?? null)); } catch {}
+  }
 } catch (e) {
   if (e?.code === "BUDGET_EXCEEDED") {
     const higher = opts.budget ? opts.budget * 2 : 1_000_000;
@@ -334,8 +339,10 @@ try {
   await shutdownClient();
   if (guiChild) {
     try { guiChild.kill(); } catch {}
-    // Settle the browser on a static final render (stops the 2s auto-refresh).
-    try { spawnSync("node", [join(BIN_DIR, "view-run.js"), "--journal", resolve(journalPath)], { stdio: "ignore" }); } catch {}
+    // Settle the browser: --settle writes a static (data-live="0") HTML plus a
+    // final sidecar (final:true). The open live page picks up the sidecar, patches
+    // to the finished state in place, and stops polling — no reload, no flicker.
+    try { spawnSync("node", [join(BIN_DIR, "view-run.js"), "--journal", resolve(journalPath), "--settle"], { stdio: "ignore" }); } catch {}
   }
   if (opts.tui) console.error("ℹ  the TUI monitor window keeps running — Ctrl-C there to close it.");
 }

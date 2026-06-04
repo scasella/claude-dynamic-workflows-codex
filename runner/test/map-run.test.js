@@ -91,6 +91,21 @@ const plain = (s) => s.replace(/\x1b\[[0-9;]*m/g, ""); // strip ANSI for asserti
   assert.match(s, /Report/);
   assert.match(s, /ship it/, "outcome from the final agent");
   assert.match(s, /1\.3M tok/, "run-total tokens = 400k + 900k = 1.3M");
+  assert.equal(run.result, undefined, "no result key when no sidecar exists");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 5b) Honest result: buildRunModel reads the *.result.json sidecar into run.result.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-res-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jf = join(jdir, "r.workflow.jsonl");
+  await writeFile(jf, JSON.stringify({ key: "a#0", label: "synthesize:plan", result: { headline: "X" }, phase: "Synthesize" }));
+  const payload = { headline: "Ship the live viewer", quick_wins: ["atomic writes", "ticking elapsed"] };
+  await writeFile(join(jdir, "r.workflow.result.json"), JSON.stringify(payload));
+  const run = buildRunModel({ journalPath: jf, runDir: dir });
+  assert.deepEqual(run.result, payload, "run.result mirrors the persisted return value");
   await rm(dir, { recursive: true, force: true });
 }
 
