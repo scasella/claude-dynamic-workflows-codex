@@ -3,6 +3,9 @@ node_modules/
 .env
 .env.*
 *.run.html
+# Live-viewer update-channel sidecars (written next to the HTML by --watch/--gui)
+*.run.data.js
+*.run.gen.js
 
 # Runtime resume journals — except the bundled demo run (kept for the viewer demo)
 .workflow-journal/
@@ -11,3 +14,6 @@ node_modules/
 
 # Lifecycle event sidecars (live-viewer observability) are runtime-only, never committed
 *.events.jsonl
+# Persisted workflow return value (the honest-result sidecar) — runtime-only.
+# Listed last so it overrides the demo-journal un-ignore above.
+*.result.json

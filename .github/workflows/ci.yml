@@ -13,9 +13,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      # Zero dependencies — no install step. These suites need neither Codex nor network:
-      # offline unit checks + the viewer robustness suite (renders every run shape in a fake DOM).
+      # Zero dependencies — no install step. Every suite is offline (no Codex, no
+      # network): unit checks, viewer robustness across run shapes, the no-reload
+      # live update channel, and the ASCII map renderer — all in a fake DOM.
       - name: Offline unit checks
         run: node runner/test/offline.js
       - name: Run-viewer robustness (all shapes)
         run: node runner/test/view-run.test.js
+      - name: Run-viewer live updates (no-reload sidecar channel)
+        run: node runner/test/view-run.live.test.js
+      - name: ASCII map renderer
+        run: node runner/test/map-run.test.js
