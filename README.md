@@ -17,8 +17,10 @@ This repo is two things that fit together:
    of Claude subagents. You author the workflow exactly like a native one; only the
    agent backend changes.
 2. **A run viewer** — a self-contained HTML **execution map** (orchestrator → phases
-   → agents → result) with zoom/pan, light/dark themes, and a per-agent detail
-   drawer. It renders *any* run's structured results generically.
+   → agents → result) with zoom/pan, light/dark themes, per-agent token/time metrics,
+   and a per-agent detail inspector. It renders *any* run's structured results
+   generically, works offline as a single file, and can **monitor a run live** — in
+   the browser or as a terminal ASCII map — patching itself in place with no flicker.
 
 > Unofficial / community project. Not affiliated with OpenAI or Anthropic.
 > "Codex" and "Claude" are trademarks of their respective owners.
@@ -105,10 +107,12 @@ node runner/bin/run-workflow.js examples/demo/nimbus-landing-redesign.workflow.j
 ```
 
 Useful flags: `--frontier` (pin all agents to the auto-detected latest frontier
-model), `--auto-effort` (scale effort to layer width), `--plan` (dry-run agent
-count + budget estimate, no tokens), `--sandbox read-only|workspace-write`,
-`--budget N` (token ceiling) with `--budget-meter total|output`, `--resume` (reuse
-a prior run's results from the journal). See `runner/bin/run-workflow.js --help`.
+model), `--auto-effort` (scale effort to layer width — lone judge/synthesize gates
+think hardest), `--plan` (dry-run agent count + budget estimate, no tokens),
+`--sandbox read-only|workspace-write`, `--budget N` (token ceiling) with
+`--budget-meter total|output`, `--tui` / `--gui` / `--monitor` (watch the run live —
+terminal map, browser viewer, or both), `--resume` (reuse a prior run's results from
+the journal). See `runner/bin/run-workflow.js --help`.
 
 A minimal script:
 
@@ -132,6 +136,7 @@ into a viewer:
 
 ```bash
 node runner/bin/view-run.js <project-dir> --open
+node runner/bin/view-run.js <project-dir> --watch --open   # live: updates in place as the run grows
 # or point at a journal / script explicitly:
 node runner/bin/view-run.js --journal path/to.jsonl --script path/to.workflow.js --out run.html
 ```
@@ -172,19 +177,52 @@ node runner/bin/map-run.js <project-dir> --watch   # live: redraws as the journa
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The viewer has two layouts (toggle top-right) and works for any run shape. It
-surfaces per-agent **tokens and time** (recorded by the runner) at agent, phase,
-and run level; add `--watch` to rebuild the HTML live as a run progresses:
+The viewer has two layouts (toggle top-right), a **Dark / Light** theme switch, and
+works for any run shape. Every agent's **tokens, time, model, and effort** (recorded
+by the runner) show at agent, phase, and run level.
 
-- **◇ Map** — the execution map. Opens at a readable 100%, centered; **Fit** (`F`)
-  frames the whole graph, scroll zooms toward the cursor, drag pans.
-- **☰ Tree** — a `Run → Phase → Agent` sidebar + detail pane:
+- **◇ Map** — the execution map: orchestrator → one row of parallel agents per phase
+  → barrier merges → **result**. Each agent node carries its model, time, and tokens;
+  it opens at a readable 100%, centered — **Fit** (`F`) frames the whole graph, `0`
+  resets to 100%, scroll zooms toward the cursor, drag pans. Wide fan-outs (more than
+  ~12 agents in a phase) fold into an **aggregate node** (`+N more`, with the hidden
+  agents' running count and token total) that you expand inline — running agents are
+  never hidden. Click any node, or the **result** node, for a slide-in **inspector**
+  that *docks beside* the graph (the map stays visible behind it) and shows the full
+  structured result.
+- **☰ Tree** — a dense `Run → Phase → Agent` inspector: each phase row shows a
+  **progress bar** with `done/total`, each agent row shows its time, tokens, and
+  model inline, and the run's actual **returned value** renders at the top — so you
+  can read the whole run without opening a single node:
 
 ![Tree view](docs/tree.png)
 
-Both render results generically (arrays-of-objects → tables, `palette` → color
-swatches, `severity`/`effort` → badges, 1–10 scores → pills) and handle flat runs,
-huge fan-outs (collapsed to "+N more"), journal-only runs, and string/null results.
+Both views render results generically (arrays-of-objects → tables with sticky
+headers, `palette` → color swatches, `severity`/`effort` → badges, 1–10 scores →
+pills, plus a raw-JSON toggle) and handle flat label-less runs, huge fan-outs,
+journal-only runs (no model chips), and string/null results. The **result** node
+shows the workflow's real return value when the runner captured it — not a heuristic
+guess at a "final" agent.
+
+The whole viewer is **keyboard-navigable** — Tab between nodes, Enter/Space to open
+the inspector, arrows to expand/collapse phases, **Esc** to close — with visible
+focus rings, and it respects `prefers-reduced-motion`.
+
+### Live, in place — no reload
+
+Add **`--watch`** and the viewer becomes a live monitor that updates **without ever
+reloading the page**. As the run progresses it patches the DOM in place: running
+agents appear amber with a **ticking elapsed clock** (and amber edges through the
+phase that's still working), finished agents flip to their result, and a status
+strip tracks **wall-clock, last-update age, and a running count**. Your view is never
+yanked: the theme, the Map/Tree toggle, the open inspector, scroll position, and map
+zoom/pan all survive every update — an inspector left open on a still-running agent
+fills in *in place* the moment that agent's result lands. When the run finishes the
+strip retires and the page settles into the static, shareable artifact.
+
+It stays a **single self-contained file**: the live channel writes tiny sidecar files
+next to the HTML and pulls them with a script tag (not `fetch`), so it updates live
+even when opened straight from disk as a `file://` — no server, no network.
 
 ---
 
@@ -236,7 +274,8 @@ Or just add **`--tui`** / **`--gui`** to any `run-workflow.js` invocation and it
 auto-opens a live monitor that tracks the run as it goes — `--tui` opens the ASCII
 map in a new terminal window, `--gui` opens the HTML viewer in your browser,
 `--monitor` opens both. Each shows **every agent, running + done**, with constant
-updates:
+updates — the browser viewer patches in place (no flicker, no reload) and settles to
+the finished run automatically when it's done:
 
 ```bash
 node runner/bin/run-workflow.js examples/market-news.workflow.js --frontier --auto-effort --gui --tui \
