@@ -132,6 +132,21 @@ const plain = (s) => s.replace(/\x1b\[[0-9;]*m/g, ""); // strip ANSI for asserti
   await rm(dir, { recursive: true, force: true });
 }
 
+// 5d) Honest result in the ASCII map: the result node summarizes run.result —
+// including a reportMarkdown shape (which the old "final agent" heuristic missed).
+{
+  const base = { name: "r", description: "", phases: [{ title: "Synthesize" }],
+    agents: [{ label: "synthesize", order: 0, phase: "Synthesize", model: "gpt-5.5", effort: "xhigh", tokens: 46000, ms: 130000, result: { reportMarkdown: "# Brief" } }],
+    models: { "gpt-5.5": 1 }, totals: { tokens: 46000, ms: 130000, hasMetrics: true }, counts: { phases: 1, agents: 1 }, sources: {} };
+  // report-shaped result → first prose line of the markdown
+  const md = plain(renderMap({ ...base, result: { reportMarkdown: "# Title\n\nThe top recommendation is to ship the MVP first." } }, { color: false, width: 80 }));
+  assert.match(md, /ship the MVP first/, "result node summarizes reportMarkdown");
+  assert.doesNotMatch(md, /no result/, "no '(no result)' when run.result is present");
+  // headline-shaped result → the headline
+  const hl = plain(renderMap({ ...base, result: { headline: "Ship the live viewer" } }, { color: false, width: 80 }));
+  assert.match(hl, /Ship the live viewer/, "result node summarizes a headline result");
+}
+
 // 6) time formatting rolls over correctly (119.6s → 2m00s, never 1m60s).
 {
   const run = {

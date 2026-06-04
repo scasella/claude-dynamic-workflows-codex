@@ -66,15 +66,32 @@ function fmtMs(ms) {
 const CIRCLED = ["⓪", "①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩", "⑪", "⑫", "⑬", "⑭", "⑮"];
 const circled = (n) => CIRCLED[n] ?? `(${n})`;
 
-// One-line outcome summary from the final agent's result, if any.
+// One-line summary of a result value — a headline-ish field, the first prose line
+// of a Markdown report, or the first substantial string. Mirrors the HTML viewer.
+function summarizeValue(r) {
+  if (r == null) return "";
+  if (typeof r === "string") return r.replace(/\s+/g, " ").trim();
+  if (typeof r !== "object") return String(r);
+  const direct = r.recommended_direction || r.recommendation || r.one_line_verdict || r.tagline
+    || r.headline || (r.hero && r.hero.headline);
+  if (direct) return String(direct);
+  if (typeof r.reportMarkdown === "string") {
+    const line = r.reportMarkdown.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"));
+    if (line) return line.replace(/[*`]/g, "");
+  }
+  return Object.values(r).find((v) => typeof v === "string" && v.length > 8) || "";
+}
+
+// Outcome summary for the result node: prefer the workflow's actual return value
+// (the honest result the runner persisted), then fall back to a heuristic "final
+// agent" result for journal-only runs that have no persisted return value.
 function outcomeSummary(run) {
+  if (run.result !== undefined && run.result !== null) return summarizeValue(run.result);
   const last = run.phases[run.phases.length - 1];
   const inLast = last ? run.agents.filter((a) => a.phase === last.title) : [];
   const fa = run.agents.find((a) => a.result && (a.result.recommended_direction || a.result.recommendation))
     || (inLast.length === 1 ? inLast[0] : null);
-  const r = fa && fa.result;
-  if (!r || typeof r !== "object") return "";
-  return r.recommended_direction || r.recommendation || r.one_line_verdict || r.headline || (r.hero && r.hero.headline) || "";
+  return fa ? summarizeValue(fa.result) : "";
 }
 
 const displayLabel = (label) => (label.includes(":") ? label.split(":").slice(1).join(":") || label : label);
