@@ -16,7 +16,7 @@
 import { writeFileSync, statSync, renameSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { execFile } from "node:child_process";
-import { locateRun, buildLiveRunModel, eventsPathFor } from "../src/runModel.js";
+import { locateRun, buildLiveRunModel, eventsPathFor, progressPathFor } from "../src/runModel.js";
 
 // Write atomically so a watching browser never loads a half-written file:
 // write to a unique temp path in the same dir, then rename (atomic on POSIX).
@@ -221,6 +221,12 @@ h2.sec{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transfor
 .kv .v{min-width:0}
 .label-mono{font-family:var(--mono)}
 .prose{white-space:pre-wrap;word-break:break-word}
+/* live streaming output (running agent, partial) */
+.streamlabel{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:12px 0 6px}
+.streamout{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:1.55;color:var(--text);
+  border-left:2px solid var(--amber);padding:1px 0 1px 12px}
+.streamcaret{display:inline-block;width:7px;height:13px;margin-left:1px;background:var(--amber);vertical-align:text-bottom;
+  animation:wfpulse 1.1s ease-in-out infinite}
 ul.clean{margin:4px 0;padding-left:18px}
 ul.clean li{margin:3px 0}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
@@ -308,6 +314,8 @@ svg.edges path.arrowhead{fill:var(--arrow)}
 .mnode.more .magg{display:flex;flex-direction:column;align-items:center;gap:3px;font-family:var(--mono);font-size:10px;color:var(--dim)}
 .mnode.more .magg .run{color:var(--amber)}
 .mnode.more .maggchips{display:flex;flex-wrap:wrap;gap:3px;justify-content:center}
+.mnode.pending{border-style:dashed;background:transparent;cursor:default;opacity:.55}
+.mnode.pending .mlabel{color:var(--dim);font-weight:500;font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
 .msdot{width:6px;height:6px;border-radius:50%;background:var(--green);position:absolute;top:12px;right:12px;opacity:.8}
 .mnode.endpoint{background:var(--endpoint-bg);border-color:var(--endpoint-border);min-width:176px;padding:17px 28px;cursor:default;gap:4px}
 .mnode.endpoint .mlabel{font-family:var(--sans);color:var(--endpoint-text);font-size:15px;font-weight:650;letter-spacing:-.01em}
@@ -684,7 +692,8 @@ function renderTable(rows){
   return wrap;
 }
 
-// running agent with no result yet — a pending skeleton instead of "(no result)"
+// running agent with no result yet — show its streaming output if the runner is
+// capturing it, else a pending skeleton instead of "(no result)".
 function pendingResult(a){
   const c=h('div',{class:'card'});
   const row=h('div',{class:'metarow'});
@@ -693,7 +702,13 @@ function pendingResult(a){
   if(a.effort) row.append(h('span',{class:'pill'},'effort · '+a.effort));
   row.append(h('span',{class:'pill'},'phase · '+a.phase));
   c.append(row);
-  c.append(h('div',{class:'prose muted',style:{marginTop:'10px'}},'Running — waiting for this agent’s result to land in the journal…'));
+  if(a.progress){
+    // live partial output — the agent is mid-stream. Shown verbatim; updates in place.
+    c.append(h('div',{class:'streamlabel'},'streaming output'));
+    c.append(h('div',{class:'streamout'}, a.progress, h('span',{class:'streamcaret'})));
+  } else {
+    c.append(h('div',{class:'prose muted',style:{marginTop:'10px'}},'Running — waiting for this agent’s first output…'));
+  }
   return c;
 }
 
@@ -924,14 +939,24 @@ function phaseRow(p,i){
     visible=all.filter(a=>pick.has(a.label));
     hidden=all.filter(a=>!pick.has(a.label));
   }
+  // a phase whose agents haven't started yet (live runs reach it later): its width
+  // isn't known until the run gets there (dynamic workflows size it at runtime), so
+  // show the phase as "pending" rather than a misleading "0 parallel".
+  const pending = all.length === 0;
   const gut=h('div',{class:'mgutter left'},
     h('div',{class:'plabel'}, h('span',{class:'pidx'},(i+1)), p.title),
     p.detail?h('div',{class:'pdetail'},p.detail):null,
-    h('div',{class:'pcount'}, st.running ? st.done+'/'+st.total+' done · '+st.running+' running' : all.length+(all.length===1?' agent':' parallel')));
+    h('div',{class:'pcount'}, pending ? 'pending' : st.running ? st.done+'/'+st.total+' done · '+st.running+' running' : all.length+(all.length===1?' agent':' parallel')));
   if(hasMetrics()){const parts=[st.tokens?fmtTokens(st.tokens)+' tok':null,st.ms?fmtMs(st.ms):null].filter(Boolean);
     if(parts.length) gut.append(h('div',{class:'pcount'},parts.join(' · ')));}
   const nodes=h('div',{class:'mnodes'}); const els=[];
   visible.forEach(a=>{const n=agentNode(a); els.push(n); nodes.append(n);});
+  if(pending){
+    // placeholder so the plan's shape is visible (and edges flow through) before
+    // this phase starts; the real agent nodes replace it when they spawn.
+    const pend=h('div',{class:'mnode pending','aria-label':p.title+' — pending'}, h('span',{class:'mlabel'},'pending'));
+    els.push(pend); nodes.append(pend);
+  }
   if(hidden.length){
     // aggregate bucket (not a fake agent): hidden count + running + tokens + model mix
     const hidRunning=hidden.filter(isRunning).length;
@@ -1004,8 +1029,11 @@ function renderMapFrame(){
     h('span',{class:'zlbl',id:'zoomlbl'},Math.round(mapZoom*100)+'%'),
     h('button',{class:'zb',title:'Zoom in',onclick:(e)=>{e.stopPropagation();zoomAt(1.2);}},'+'),
     h('button',{class:'zb fit',title:'Fit & center  (F)',onclick:(e)=>{e.stopPropagation();fitMap();}},'⤢ Fit')));
-  // wheel zoom toward cursor; drag empty space to pan
-  frame.addEventListener('wheel',(e)=>{ e.preventDefault(); noteInteract(); const vp=frame.getBoundingClientRect();
+  // wheel zoom toward cursor; drag empty space to pan. Bail when the wheel is over
+  // the inspector or controls so they scroll normally (don't hijack it to zoom).
+  frame.addEventListener('wheel',(e)=>{
+    if(e.target&&e.target.closest&&e.target.closest('.drawer,.mapctl')) return;
+    e.preventDefault(); noteInteract(); const vp=frame.getBoundingClientRect();
     zoomAt(e.deltaY<0?1.12:0.89, e.clientX-vp.left, e.clientY-vp.top); }, {passive:false});
   frame.addEventListener('pointerdown',(e)=>{
     if(e.target&&e.target.closest&&e.target.closest('.mnode,.mapctl,.drawer')) return;
@@ -1239,11 +1267,12 @@ if (opts.settle) {
     console.error(`↻ watching ${journalPath} — live-updating ${outPath} on change (Ctrl-C to stop)`);
     let lastSig = "";
     const eventsPath = eventsPathFor(journalPath);
+    const progressPath = progressPathFor(journalPath);
     // size+mtime, not size alone: a truncate/rewrite/resume can keep byte count
-    // stable while content changes, and the events sidecar is rewritten in place.
+    // stable while content changes, and the sidecars are rewritten in place.
     const sig = (p) => { try { const s = statSync(p); return s.size + ":" + s.mtimeMs; } catch { return "0:0"; } };
     const tick = () => {
-      const cur = sig(journalPath) + "|" + sig(eventsPath);
+      const cur = sig(journalPath) + "|" + sig(eventsPath) + "|" + sig(progressPath);
       if (cur !== lastSig) {
         lastSig = cur;
         try {

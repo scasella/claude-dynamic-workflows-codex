@@ -144,6 +144,9 @@ async function runOneTurn(prompt, opts) {
     if (p.threadId !== threadId) return;
     if (n.method === "item/agentMessage/delta" && typeof p.delta === "string") {
       deltas.set(p.itemId, (deltas.get(p.itemId) ?? "") + p.delta);
+      // surface the partial output so a live viewer can show progress while the
+      // agent is still writing. Best-effort — must never break the turn.
+      if (opts.onProgress) { try { opts.onProgress([...deltas.values()].join("")); } catch {} }
     } else if (n.method === "item/completed" && p.item?.type === "agentMessage") {
       finalText = p.item.text ?? finalText;
     }

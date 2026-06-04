@@ -14,6 +14,7 @@ node_modules/
 
 # Lifecycle event sidecars (live-viewer observability) are runtime-only, never committed
 *.events.jsonl
-# Persisted workflow return value (the honest-result sidecar) — runtime-only.
-# Listed last so it overrides the demo-journal un-ignore above.
+# Persisted workflow return value + live partial-output sidecars — runtime-only.
+# Listed last so they override the demo-journal un-ignore above.
 *.result.json
+*.progress.json

@@ -130,6 +130,7 @@ export function createRuntime({
   onLog,
   onAgentPlan, // dry-run sink: receives { label, phase, effort, width, schema } per agent
   onEvent, // lifecycle sink: { type:'start'|'end'|'cached', label, phase, ... } for live viewers
+  onProgress, // live partial-output sink: (label, partialText) while an agent streams
   journal = null,
   runAgent = codexAgent, // seam: injected in tests to capture resolved opts
 } = {}) {
@@ -204,7 +205,11 @@ export function createRuntime({
     // is unchanged); fold them into the journal entry alongside phase/effort/model.
     let metrics = null;
     const result = await pooled(() =>
-      runAgent(prompt, { ...merged, defaultModel, pinnedModel, log: onLog, onMetrics: (m) => { metrics = m; } }),
+      runAgent(prompt, {
+        ...merged, defaultModel, pinnedModel, log: onLog,
+        onMetrics: (m) => { metrics = m; },
+        onProgress: onProgress ? (text) => onProgress(label, text) : undefined,
+      }),
     );
     onEvent?.({
       type: "end", label, phase: effectivePhase, effort: merged.effort ?? null,

@@ -83,7 +83,9 @@ const cases = [
       J({ t: 87000, type: "end", label: "gather:indices", phase: "Gather" }),
       J({ t: 1000, type: "start", label: "gather:movers", phase: "Gather", model: "gpt-5.5", effort: "high" }),
       J({ t: 1000, type: "start", label: "gather:macro", phase: "Gather", model: "gpt-5.5", effort: "high" }),
-    ] },
+    ],
+    // a running agent mid-stream — the drawer should render its partial output
+    progress: { "gather:macro": "Pulling the latest macro print and comparing to consensus…" } },
   // Per-agent metric fields the runtime now persists (phase/model/effort/tokens/ms)
   // — the viewer should read them straight from the journal, no script needed.
   { name: "enriched", lines: [
@@ -121,6 +123,7 @@ for (const c of cases) {
   if (c.events) writeFileSync(join(jdir, c.name + ".workflow.events.jsonl"), c.events.join("\n"));
   if (c.script) writeFileSync(join(dir, c.name + ".workflow.js"), c.script);
   if (c.result !== undefined) writeFileSync(join(jdir, c.name + ".workflow.result.json"), JSON.stringify(c.result));
+  if (c.progress) writeFileSync(join(jdir, c.name + ".workflow.progress.json"), JSON.stringify(c.progress));
   const out = join(ROOT, c.name + ".html");
   let r;
   try {

@@ -105,6 +105,18 @@ export function readResult(journalPath) {
   try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; }
 }
 
+// Live partial output for in-flight agents: { label: latest streamed text }. The
+// runner rewrites this while agents stream; the viewer shows it for running agents.
+export function progressPathFor(journalPath) {
+  return journalPath.replace(/\.jsonl$/i, "") + ".progress.json";
+}
+
+export function readProgress(journalPath) {
+  const p = progressPathFor(journalPath);
+  if (!existsSync(p)) return {};
+  try { return JSON.parse(readFileSync(p, "utf8")) || {}; } catch { return {}; }
+}
+
 export function readEvents(journalPath) {
   const p = eventsPathFor(journalPath);
   if (!existsSync(p)) return null;
@@ -256,6 +268,11 @@ export function buildLiveRunModel(opts) {
     }
     // refresh phaseOrder-derived counts
     run.counts = { phases: run.phases.length, agents: run.agents.length };
+  }
+  // attach live partial output to still-running agents (shown in the drawer)
+  const prog = readProgress(opts.journalPath);
+  for (const a of run.agents) {
+    if (a.status === "running" && prog[a.label]) a.progress = prog[a.label];
   }
   return run;
 }

@@ -9,7 +9,7 @@
 // to stdout, so you can pipe it:  run-workflow wf.js | jq .
 
 import { resolve, basename, dirname, join } from "node:path";
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -17,7 +17,7 @@ import { runWorkflowFile } from "../src/runWorkflow.js";
 import { getClient, shutdownClient } from "../src/codexAgent.js";
 import { pickFrontier } from "../src/modelMap.js";
 import { Journal } from "../src/journal.js";
-import { eventsPathFor, resultPathFor } from "../src/runModel.js";
+import { eventsPathFor, resultPathFor, progressPathFor } from "../src/runModel.js";
 
 const BIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -263,6 +263,8 @@ if (pinnedModel) console.error(`⊙ pinning all agents to model: ${pinnedModel}`
 // --no-journal disables, --journal overrides the path, --fresh discards first.
 let journal = null;
 let onEvent;
+let onProgress;
+let progressTimer = null;
 let journalPath = null;
 if (!opts.noJournal) {
   journalPath =
@@ -278,7 +280,37 @@ if (!opts.noJournal) {
   // journal, truncated fresh each run, best-effort so it never blocks the run.
   const eventsPath = eventsPathFor(journalPath);
   try { writeFileSync(eventsPath, ""); } catch {}
+
+  // Live partial-output sidecar: { label: latest partial text } for agents that are
+  // still streaming, so a live viewer can preview progress instead of a blank pane.
+  // Rewritten on a throttle (atomic), bounded in size, best-effort — never blocks.
+  const progressPath = progressPathFor(journalPath);
+  try { writeFileSync(progressPath, "{}"); } catch {}
+  const progress = new Map();
+  let progressDirty = false;
+  const flushProgress = () => {
+    progressDirty = false;
+    try {
+      const obj = {};
+      for (const [k, v] of progress) obj[k] = v.length > 4000 ? v.slice(-4000) : v; // bounded tail
+      const tmp = progressPath + ".tmp";
+      writeFileSync(tmp, JSON.stringify(obj));
+      renameSync(tmp, progressPath);
+    } catch {}
+  };
+  const scheduleProgress = () => {
+    progressDirty = true;
+    if (progressTimer) return;
+    progressTimer = setInterval(() => {
+      if (progressDirty) flushProgress();
+      else { clearInterval(progressTimer); progressTimer = null; } // idle → stop until next stream
+    }, 700);
+  };
+  onProgress = (label, text) => { progress.set(label, text); scheduleProgress(); };
+
   onEvent = (e) => {
+    // an agent that finished shows its real result, not a stale partial — drop it
+    if ((e.type === "end" || e.type === "cached") && e.label && progress.delete(e.label)) scheduleProgress();
     try { appendFileSync(eventsPath, JSON.stringify({ t: Date.now(), ...e }) + "\n"); } catch {}
   };
 }
@@ -316,6 +348,7 @@ try {
     onPhase,
     onLog,
     onEvent,
+    onProgress,
     journal,
   });
   console.error("\n─── result ───");
@@ -336,6 +369,7 @@ try {
   }
   process.exitCode = 1;
 } finally {
+  if (progressTimer) { try { clearInterval(progressTimer); } catch {} progressTimer = null; }
   await shutdownClient();
   if (guiChild) {
     try { guiChild.kill(); } catch {}

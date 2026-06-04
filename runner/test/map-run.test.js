@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { buildRunModel, liveState, locateRun } from "../src/runModel.js";
+import { buildRunModel, buildLiveRunModel, liveState, locateRun } from "../src/runModel.js";
 import { renderMap, agentSnippet } from "../src/asciiMap.js";
 
 const MAP_BIN = new URL("../bin/map-run.js", import.meta.url).pathname;
@@ -106,6 +106,29 @@ const plain = (s) => s.replace(/\x1b\[[0-9;]*m/g, ""); // strip ANSI for asserti
   await writeFile(join(jdir, "r.workflow.result.json"), JSON.stringify(payload));
   const run = buildRunModel({ journalPath: jf, runDir: dir });
   assert.deepEqual(run.result, payload, "run.result mirrors the persisted return value");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 5c) Live progress: buildLiveRunModel attaches the *.progress.json partial output
+// to a still-running agent (shown streaming in the drawer); done agents get none.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-prog-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jf = join(jdir, "r.workflow.jsonl");
+  await writeFile(jf, JSON.stringify({ key: "d#0", label: "map:done", result: { ok: 1 }, phase: "Map" }));
+  await writeFile(join(jdir, "r.workflow.events.jsonl"), [
+    JSON.stringify({ t: 1000, type: "start", label: "map:done", phase: "Map" }),
+    JSON.stringify({ t: 2000, type: "end", label: "map:done", phase: "Map" }),
+    JSON.stringify({ t: 1500, type: "start", label: "map:live", phase: "Map", model: "gpt-5.5", effort: "high" }),
+  ].join("\n"));
+  await writeFile(join(jdir, "r.workflow.progress.json"), JSON.stringify({ "map:live": "partial streamed output…", "map:done": "stale, should be ignored" }));
+  const run = buildLiveRunModel({ journalPath: jf, runDir: dir });
+  const live = run.agents.find((a) => a.label === "map:live");
+  const done = run.agents.find((a) => a.label === "map:done");
+  assert.ok(live && live.status === "running", "running agent merged from the event stream");
+  assert.equal(live.progress, "partial streamed output…", "progress attached to the running agent");
+  assert.equal(done.progress, undefined, "no progress on a completed agent (it shows its real result)");
   await rm(dir, { recursive: true, force: true });
 }
 
