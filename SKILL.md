@@ -181,9 +181,10 @@ Key `agent()` opts: `schema` (JSON Schema → Codex `outputSchema`, result parse
 this agent — set it inside concurrent `pipeline`/`parallel` stages), `timeoutMs`.
 
 Read **`references/authoring.md`** for the full guide and the standard quality
-patterns (adversarial verify, judge panel, loop-until-budget, multi-modal sweep),
-and **`examples/`** for runnable templates (`hello.workflow.js`,
-`review.workflow.js`).
+patterns (adversarial / **majority refute-by-default** verify, judge panel,
+**loop-until-dry**, **fresh-context review gate**, multi-modal sweep), and
+**`examples/`** for runnable templates — `hello`, `review`, `bug-hunt`
+(loop-until-dry + majority verify), `review-gates` (producer ≠ reviewer).
 
 ## Running
 
@@ -214,7 +215,9 @@ run-workflow <script.js>
   terminal window; `--gui` opens the self-contained HTML viewer in the browser;
   `--monitor` opens both. They run alongside the workflow (which still prints its
   result JSON to stdout as usual), so pass them in addition to `--frontier
-  --auto-effort`. Both need journaling (not `--no-journal`).
+  --auto-effort`. Both need journaling (not `--no-journal`). The `--gui` viewer
+  updates **in place** (no reload/flicker), shows each running agent's **streaming
+  output** in the drawer, and settles to the finished run automatically.
 
 - **Cost** — a run can spawn many agents and use real tokens. Keep the single
   frontier model (see *Model*) and bound cost with `--auto-effort` (already
@@ -296,17 +299,20 @@ It auto-finds the journal and the `*.workflow.js` script in that dir (or pass
 `--journal PATH` / `--script PATH` / `--out PATH`), writes `<name>.run.html`, and
 `--open` launches it. Offline/self-contained (data embedded). Per-agent **tokens,
 time, model, and effort** (recorded by the runner) show per agent, per phase, and
-per run; add **`--watch`** to rebuild the HTML live as a run progresses. Two views,
-toggled top-right:
+per run; add **`--watch`** for a live monitor that updates **in place — no reload,
+no flicker** (theme / view / selected node / open drawer / scroll / zoom all
+survive each update). Two views, toggled top-right:
 
 - **◇ Map** (default) — the execution map: orchestrator → one row of parallel
-  agents per phase → barrier merges → result, with connectors. Click any agent
-  node for a slide-in drawer with its full result. It **opens at a readable 100%**,
-  centered/top-anchored; scroll-wheel zooms toward the cursor, drag empty space to
-  pan, and the bottom-right `− / + / ⤢ Fit` controls (keys `F`=fit whole graph,
-  `0`=reset to 100%, `+`/`−`) let you frame the whole run or zoom into a cluster.
-- **☰ Tree** — a `Run → Phase → Agent` sidebar with a detail pane (the dense,
-  read-everything layout).
+  agents per phase → barrier merges → **result**. Each node shows its model / time /
+  tokens; click any for a **docked inspector** (the map stays visible behind it)
+  with its full result — and a *running* agent **streams its partial output** there
+  live. The **result** node shows the workflow's actual return value. Wide phases
+  fold into an aggregate node you **expand inline** (running agents are never
+  hidden); not-yet-started phases show a "pending" placeholder. Opens at a readable
+  100%; `F`=fit whole graph, `0`=reset, scroll zooms toward the cursor, drag pans.
+- **☰ Tree** — a dense `Run → Phase → Agent` inspector: phase **progress bars** with
+  inline per-agent time / tokens / model, and the run's actual result at the top.
 
 A **Dark / Light** toggle (top-right) switches themes; the light/cream theme is a
 clean diagram style (black orchestrator/result nodes, white agent nodes, dark
@@ -315,14 +321,16 @@ color swatches for palettes, severity/effort badges, 1–10 score pills, and a
 raw-JSON toggle per agent.
 
 It works for **any** run: barrier/phase or pipeline shapes, flat label-less runs
-(grouped under one phase), huge fan-outs (phases over ~12 agents collapse to a
-"+N more" node in the map; the Tree shows all), journal-only runs with no script
-(no model chips), and string/null results. `runner/test/view-run.test.js` smoke-
-renders all these shapes.
+(grouped under one phase), huge fan-outs (phases over ~12 agents fold into an
+aggregate node you expand inline; the Tree shows all), journal-only runs with no
+script (no model chips), and string/null results. `runner/test/view-run.test.js`
+smoke-renders all these shapes.
 
 ## References
 
 - `references/authoring.md` — full DSL + standard quality patterns.
 - `references/runner-readme.md` — architecture, the Codex protocol mapping,
   faithfulness vs. the native runtime, and limits.
-- `examples/hello.workflow.js`, `examples/review.workflow.js` — runnable templates.
+- `examples/` — runnable templates: `hello`, `review`, `bug-hunt` (loop-until-dry +
+  majority refute-by-default), `review-gates` (fresh-context review gate),
+  `deep-research`, `tournament-sort`, `triage`, `classify-route`.
