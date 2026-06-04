@@ -58,8 +58,21 @@ skill). It is dependency-free Node ≥ 18.
    in a new terminal window) and/or `--gui` (live HTML viewer in the browser) — see
    *Running → Live monitoring*.
 
-4. **Surface** the result to the user — summarize it, and mention the script
-   path so they can rerun or tweak it.
+4. **Surface** the result to the user — summarize it, mention the script path, and
+   **render the run's ASCII map inline in this conversation** so they see the
+   execution graph natively (no window to open):
+   ```bash
+   node ~/.claude/skills/codex-workflows/runner/bin/map-run.js --journal <journal> --no-color
+   ```
+   (`<journal>` is the path the run logged as `✎ journal: …`, default
+   `.workflow-journal/<name>.jsonl`.) Paste that output into your reply inside a
+   ```` ```text ```` block — it's the orchestrator → phase layers → agent grid →
+   result DAG with per-agent model/effort/tokens/time and a one-line result snippet
+   per agent. **Always use `--no-color`** inline (raw ANSI would render as garbage
+   in chat). For **live, in-session** monitoring, run the workflow with
+   `run_in_background` and re-render this snapshot a few times while it's in flight
+   (running agents show as `⠋ … running…`); for a smooth live *window* instead, add
+   `--tui`/`--gui` (see *Running → Live monitoring*).
 
 **Do NOT call the native `Workflow` tool while using this skill.** Authoring the
 script and running it through the CLI above is exactly what routes the work to
