@@ -13,7 +13,7 @@ import { isGitRepo, createWorktree } from "../src/worktree.js";
 import { identityHash, Journal } from "../src/journal.js";
 import { resolveModel, pickFrontier } from "../src/modelMap.js";
 import { loadAgentType } from "../src/agentTypes.js";
-import { isRetryable } from "../src/codexAgent.js";
+import { isRetryable, strictifySchema } from "../src/codexAgent.js";
 import { recordTokenUsage, resetMeter, tokensSpent, outputSpent, tokensForThread } from "../src/meter.js";
 import { versionDriftNote } from "../src/codexVersion.js";
 
@@ -392,6 +392,41 @@ const exec = promisify(execFile);
   assert.equal(ends[0].label, "a");
   assert.equal(ends[0].ms, 10, "end carries per-agent metrics");
   assert.equal(ends[0].tokens, 2);
+}
+
+// strictifySchema — OpenAI strict mode needs every property in `required`
+// (recursively). This is the exact shape that 400'd a real run: an array-of-objects
+// whose items omit a property from `required`.
+{
+  const authored = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      painPoints: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: { pain: { type: "string" }, buyer: { type: "string" }, whoFeelsItNow: { type: "string" } },
+          required: ["pain", "buyer"], // <-- whoFeelsItNow omitted (the bug)
+        },
+      },
+      summary: { type: "string" },
+    },
+    required: ["painPoints"], // <-- summary omitted
+  };
+  const strict = strictifySchema(authored);
+  assert.deepEqual(strict.required.sort(), ["painPoints", "summary"], "top-level: every property required");
+  assert.deepEqual(
+    strict.properties.painPoints.items.required.sort(),
+    ["buyer", "pain", "whoFeelsItNow"],
+    "nested array-item object: every property required (the field that 400'd is now included)",
+  );
+  assert.equal(strict.properties.painPoints.items.additionalProperties, false, "objects get additionalProperties:false");
+  assert.equal(strict.properties.painPoints.items.properties.whoFeelsItNow.type, "string", "field types are unchanged");
+  assert.deepEqual(authored.properties.painPoints.items.required, ["pain", "buyer"], "the input schema is not mutated");
+  // non-object schemas pass through untouched
+  assert.deepEqual(strictifySchema({ type: "string" }), { type: "string" });
 }
 
 console.log("offline checks passed ✓");

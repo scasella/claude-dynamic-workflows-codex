@@ -205,9 +205,13 @@ web search if your Codex has web tools).
   read or write files, instruct an `agent()` to do it — e.g. *"Read src/auth.ts
   and …"*. With `sandbox: 'read-only'` an agent can read anywhere; with
   `workspace-write` it can edit within its cwd.
-- **Schemas**: prefer an object at the root with `additionalProperties:false` and
-  explicit `required`. The result is parsed JSON; the runner tolerates ```json
-  fences as a fallback but a clean object root is most reliable.
+- **Schemas**: prefer an object at the root. OpenAI strict structured outputs
+  require **every property to be in `required`** and `additionalProperties:false` on
+  every object — the runner **auto-normalizes** this for you (recursively), so a
+  forgotten `required` key won't 400 the turn. There is no "optional" in strict
+  mode: for a field the model may leave empty, make it **nullable**
+  (`type:['string','null']`) rather than omitting it from `required`. The result is
+  parsed JSON; the runner also tolerates ```json fences as a fallback.
 - **One model, effort is the lever.** Runs use `--frontier`, which pins a single
   latest-frontier model (e.g. `gpt-5.5`) and **overrides any per-call `model`** —
   so leave `model` out of `agent()` opts. This is a deliberate divergence from the

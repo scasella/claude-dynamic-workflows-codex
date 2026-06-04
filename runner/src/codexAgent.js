@@ -14,6 +14,35 @@ import { recordTokenUsage, tokensForThread } from "./meter.js";
 import { resolveModel, modelId } from "./modelMap.js";
 import { loadAgentType } from "./agentTypes.js";
 
+// Normalize an authored JSON Schema for OpenAI strict structured outputs, which
+// require EVERY property to be listed in `required` and `additionalProperties:false`
+// on every object (optional fields are expressed as nullable types instead).
+// Authors routinely omit a key, which 400s the turn — so make a valid-looking
+// schema acceptable, recursively. This only sets required/additionalProperties; it
+// never changes a field's declared type.
+export function strictifySchema(s) {
+  if (!s || typeof s !== "object") return s;
+  if (Array.isArray(s)) return s.map(strictifySchema);
+  const out = { ...s };
+  if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
+    const props = {};
+    for (const k of Object.keys(out.properties)) props[k] = strictifySchema(out.properties[k]);
+    out.properties = props;
+    out.required = Object.keys(props); // strict mode: every property is required
+    if (out.additionalProperties === undefined) out.additionalProperties = false;
+  }
+  if (out.items) out.items = strictifySchema(out.items);
+  for (const kw of ["anyOf", "oneOf", "allOf"]) if (Array.isArray(out[kw])) out[kw] = out[kw].map(strictifySchema);
+  for (const kw of ["$defs", "definitions"]) {
+    if (out[kw] && typeof out[kw] === "object") {
+      const d = {};
+      for (const k of Object.keys(out[kw])) d[k] = strictifySchema(out[kw][k]);
+      out[kw] = d;
+    }
+  }
+  return out;
+}
+
 let clientPromise; // lazily-connected, self-healing singleton
 let availableModels = []; // ids exposed by model/list, refreshed on each connect
 
@@ -135,7 +164,7 @@ async function runOneTurn(prompt, opts) {
   const turnParams = { threadId, input: [{ type: "text", text: String(prompt) }] };
   if (model) turnParams.model = model;
   if (opts.effort) turnParams.effort = opts.effort;
-  if (opts.schema) turnParams.outputSchema = opts.schema;
+  if (opts.schema) turnParams.outputSchema = strictifySchema(opts.schema);
 
   let finalText = "";
   const deltas = new Map();
