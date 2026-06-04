@@ -1,6 +1,6 @@
 # Claude Dynamic Workflows — on Codex
 
-> Run Claude Code's **dynamic-workflow orchestration** on a local **Codex (GPT)** backend — and **visualize any run** as an interactive execution map.
+> A **Claude Code skill**: type `/codex-workflows <task>` and a fleet of **Codex (GPT) agents** fans out across the work — Claude authors the workflow, runs it on your local `codex app-server`, and streams it back as a live **execution map**.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 ![Node ≥ 18](https://img.shields.io/badge/node-%E2%89%A5%2018-green.svg)
@@ -9,18 +9,12 @@
 
 ![Execution map](docs/map-dark.png)
 
-This repo is two things that fit together:
+You describe a task; Claude Code writes a [dynamic-workflow](https://code.claude.com/docs/en/workflows) script — `agent()` / `parallel()` / `pipeline()` / `phase()` / `budget` — and runs it across dozens of GPT-5 agents instead of Claude subagents. The runtime holds the loop, branching, and intermediate results, so your context only sees the final answer — and you watch it build as an interactive map. Great for codebase audits, large migrations, cross-checked research, and idea generation.
 
-1. **A Claude Code skill + runner** that executes the dynamic-workflows DSL —
-   `agent()` / `parallel()` / `pipeline()` / `phase()` / `budget` — against your
-   local `codex app-server`. A fleet of **Codex/GPT agents** does the work instead
-   of Claude subagents. You author the workflow exactly like a native one; only the
-   agent backend changes.
-2. **A run viewer** — a self-contained HTML **execution map** (orchestrator → phases
-   → agents → result) with zoom/pan, light/dark themes, per-agent token/time metrics,
-   and a per-agent detail inspector. It renders *any* run's structured results
-   generically, works offline as a single file, and can **monitor a run live** — in
-   the browser or as a terminal ASCII map — patching itself in place with no flicker.
+This repo is **two ways in**:
+
+1. **The `/codex-workflows` skill** — how you use it day to day, from the Claude Code TUI. **Start here ↓**
+2. **A standalone runner + viewer** — the same engine without Claude Code (a CLI, [near the end](#without-claude-code-standalone-cli)).
 
 > Unofficial / community project. Not affiliated with OpenAI or Anthropic.
 > "Codex" and "Claude" are trademarks of their respective owners.
@@ -29,7 +23,7 @@ This repo is two things that fit together:
 
 ## See it now (no Codex required)
 
-The viewer is offline and self-contained, and a sample run is bundled:
+Want a look at what a finished run is before installing anything? The viewer is offline and self-contained, and a sample run is bundled:
 
 ```bash
 git clone https://github.com/scasella/claude-dynamic-workflows-codex
@@ -37,39 +31,19 @@ cd claude-dynamic-workflows-codex
 node runner/bin/view-run.js examples/demo --open
 ```
 
-That opens the map above — a fictional 4-phase landing-page review (Audit → Concept
-→ Judge → Synthesize). Click any node to open its full result; press **F** to frame
-the whole graph, drag to pan, scroll to zoom.
+That opens the map above — a fictional 4-phase landing-page review. Click any node for its full result; **F** frames the graph, drag to pan, scroll to zoom.
 
-| Dark | Light |
-| :--- | :--- |
-| ![dark](docs/map-dark.png) | ![light](docs/map-light.png) |
+| Dark | Light | Inspector |
+| :--- | :--- | :--- |
+| ![dark](docs/map-dark.png) | ![light](docs/map-light.png) | ![drawer](docs/drawer.png) |
 
-Click a node → drill into its structured result (schema-aware: tables, color
-swatches, score pills, severity/effort badges, raw JSON):
-
-![drawer](docs/drawer.png)
+This is the viewer you'll be looking at. The rest of this guide is how to *drive* it from Claude Code.
 
 ---
 
-## Why
+## Install
 
-Claude Code has [dynamic workflows](https://code.claude.com/docs/en/workflows): a
-JavaScript script orchestrates dozens-to-hundreds of subagents at scale, and the
-runtime holds the loop, branching, and intermediate results so your context only
-sees the final answer. It's great for codebase audits, large migrations, and
-cross-checked research.
-
-This project **re-hosts that same DSL but points `agent()` at Codex** — so you can
-fan work across GPT-5 agents from the same script shape. It adds the piece the
-native feature doesn't have for arbitrary backends: a standalone, shareable
-**visualization** of what a run actually did.
-
----
-
-## Install as a Claude Code skill
-
-Clone the repo into your personal skills folder, as the `codex-workflows` skill:
+Clone the repo into your Claude Code skills folder, as the `codex-workflows` skill:
 
 ```bash
 git clone https://github.com/scasella/claude-dynamic-workflows-codex ~/.claude/skills/codex-workflows
@@ -77,44 +51,140 @@ git clone https://github.com/scasella/claude-dynamic-workflows-codex ~/.claude/s
 
 **Prerequisites**
 
-- [Node](https://nodejs.org) ≥ 18
-- The [`codex`](https://developers.openai.com/codex/cli) CLI on your `PATH`, logged in:
-  `codex login` (verify with `node ~/.claude/skills/codex-workflows/runner/test/handshake.js`)
+- [Node](https://nodejs.org) ≥ 18 (zero npm dependencies to install)
+- The [`codex`](https://developers.openai.com/codex/cli) CLI on your `PATH`, logged in: `codex login`
+  (verify with `node ~/.claude/skills/codex-workflows/runner/test/handshake.js` → `state: ready`)
 
-Then, in Claude Code:
+That's it — the skill is now available in Claude Code as `/codex-workflows`.
+
+---
+
+## Using it in Claude Code
+
+The skill is **manual-invoke only** — Claude never auto-triggers it. You type `/codex-workflows` and describe the task in plain language:
 
 ```
 /codex-workflows  Audit every route under src/ for missing auth checks
 ```
 
-The skill is **manual-invoke only** — Claude won't auto-trigger it. When you invoke
-it, Claude authors a workflow script and runs it on Codex via the bundled runner,
-pinning every agent to the latest frontier model.
+Behind that one line, Claude:
 
-> Don't use Claude Code? You can still use the **runner and viewer standalone** —
-> see below.
+1. **Preflights** Codex — confirms the app-server is reachable and notes the latest frontier model.
+2. **Authors** a workflow script into your project (`./<name>.workflow.js`) — so you can read it, tweak it, and rerun it.
+3. **Runs** it on Codex, pinning **every agent to the latest frontier model** (`gpt-5.5`) and **auto-scaling each agent's thinking effort** to its layer — a lone judge/synthesize gate thinks hardest (`xhigh`), wide fan-outs get the `high` floor.
+4. **Surfaces** the outcome right in the conversation — a summary, the script path, and the run's **execution map rendered inline** as text:
+
+```text
+╭─ ◆ market-news ──────────────────────────────────────────────────────────────╮
+│ ✓✓✓✓✓✓  6/6 done · 2 phases · 701k tok · 20m27s · gpt-5.5                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  │
+  ▼ ① Gather ───────────────────────────────────  5 agents · 622k tok · 17m38s
+      AGENT      MODEL    EFFORT  TOKENS    WALL
+  ├─✓ indices    gpt-5.5  high       52k   1m26s
+  │   S&P 500 rose 0.4% to a record 6,012; Nasdaq +0.6% and Dow +0.3% close.
+  ├─✓ movers     gpt-5.5  high      140k   5m16s
+  │   Nvidia gained ~3% on AI demand; a major retailer slid 8% on guidance.
+  ╰─✓ catalysts  gpt-5.5  high      128k   3m27s
+      Several megacap earnings beat after the bell; Fed stayed data-dependent.
+  ┄ barrier · Gather → Synthesize ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+  ▼ ② Synthesize ──────────────────────────────────  1 agent · 79k tok · 2m49s
+  ╰─✓ brief      gpt-5.5  xhigh      79k   2m49s
+      Fed, jobs and AI earnings kept stocks near records into June 3.
+  │
+  ▼
+╭─ ✦ result ───────────────────────────────────────────────────────────────────╮
+│ Fed, jobs and AI earnings kept stocks near records into the June 3 close.    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+### Steering your run — just ask
+
+You don't manage flags; you describe what you want and Claude wires it up. Common asks:
+
+| You want to… | Say something like… | What Claude does |
+| :--- | :--- | :--- |
+| **Watch it build live** | "…and let me watch it" · "open the live GUI" | opens a browser viewer (`--gui`) and/or a new-terminal ASCII map (`--tui`) that update **in place** as agents run |
+| **See the size/cost first** | "plan it first — how many agents, roughly how much?" | a **no-token dry run** (`--plan`) that counts agents per phase and estimates a budget |
+| **Cap the spend** | "keep it under ~5M tokens" | a hard `--budget` ceiling — tripping it isn't fatal, it prints a one-line `--resume` to continue |
+| **Keep it read-only** | "read-only — don't let agents write files" | runs every agent with `--sandbox read-only` (good for audits, research, exploration) |
+| **Let it edit files** | "let it apply the migration" | `--sandbox workspace-write` (the default) so agents can write |
+| **Resume after a stop** | "resume that run" | replays already-finished agents from the journal **free**, runs only the rest |
+| **Pick a specific pattern** | "do a loop-until-dry bug hunt" · "fresh-context review with independent reviewers" | authors that exact pattern (see the [pattern library](references/authoring.md)) |
+
+Two things you *don't* tune: it's always **one frontier model for every agent** and **auto-effort** — no model-mixing, no per-agent effort bookkeeping. To spend less, lower the budget or ask for read-only; not a smaller model.
+
+### Example invocations
+
+```
+# Audit — scan in parallel, then a skeptic confirms each finding
+/codex-workflows  Audit every route under src/ for missing authorization, read-only
+
+# Research — fan out across the web, cross-check every claim, cite the survivors
+/codex-workflows  Research the current state of on-device LLM inference and verify each claim, then watch it live
+
+# Brainstorm — generate, dedup, judge, recommend (plan it first to see the cost)
+/codex-workflows  Brainstorm 10 product ideas from this repo, score them with 3 judges, recommend the top 3 — plan it first
+
+# Review — producer drafts, independent reviewers sign off (no agent reviews its own work)
+/codex-workflows  Review the files I changed for bugs with a fresh-context review gate
+
+# Triage — classify a batch in parallel, dedupe, route (untrusted text stays read-only)
+/codex-workflows  Triage these 40 issues and route each to a team
+
+# Migrate — find every call site and rewrite it (needs write access)
+/codex-workflows  Find every call of legacyFetch() and migrate it to the new client, then apply the edits
+```
+
+### Following a run
+
+- Claude renders the **execution map inline** as the run progresses and again when it lands — so you can follow it without leaving the conversation.
+- For the full browser GUI at any time, just ask Claude to **open the viewer** (it runs `view-run` on the run's journal).
+- Every run is journaled to `<project>/.workflow-journal/<name>.jsonl`; ask Claude to **open the last run in the viewer** to revisit a past run.
+- The script Claude wrote stays in your project — rerun or edit it directly, or ask Claude to adjust it.
+
+> **Not what you wanted?** If you actually want **Claude** subagents (not Codex), use Claude Code's native Workflow tool instead — this skill deliberately routes the work to Codex/GPT.
 
 ---
 
-## Use the runner standalone
+## The run viewer
+
+Whether Claude opens it (`--gui` / "open the viewer") or you generate it yourself, you get one **self-contained HTML file** — works offline, shareable, no server. Two layouts (toggle top-right), a **Dark / Light** theme, and per-agent **tokens, time, model, and effort** at agent, phase, and run level.
+
+- **◇ Map** — orchestrator → one row of parallel agents per phase → barrier merges → **result**. Each node carries its model / time / tokens; it opens at a readable 100% (**F** = fit the whole graph, `0` = reset, scroll zooms toward the cursor, drag pans). Wide fan-outs fold into an **aggregate node** you expand inline (running agents are never hidden); not-yet-started phases show a "pending" placeholder. Click any node — or the **result** node — for an **inspector that docks beside the graph** (the map stays visible) with the full structured result.
+- **☰ Tree** — a dense `Run → Phase → Agent` inspector: phase **progress bars** with inline per-agent time / tokens / model, and the run's actual **returned value** at the top.
+
+![Tree view](docs/tree.png)
+
+Results render generically (arrays-of-objects → tables, `palette` → swatches, `severity`/`effort` → badges, 1–10 → score pills, raw-JSON toggle), and it's fully **keyboard-navigable** (Tab / Enter / arrows / Esc) with `prefers-reduced-motion` support.
+
+**Live, in place — no reload.** With `--gui`/`--watch` the viewer is a live monitor that patches the DOM **without ever reloading**: running agents are amber with a ticking clock and **stream their partial output in the drawer**, finished agents flip to their result, and a status strip tracks wall-clock / last-update age / running count. Your view is never yanked — theme, layout, the open inspector, scroll, and zoom all survive every update; an inspector left open on a still-running agent fills in *in place* the moment its result lands. When the run finishes it settles into the static, shareable artifact. (It stays a single file: the live channel uses tiny sidecars pulled via a script tag, not `fetch`, so it updates live even opened as a `file://`.)
+
+Prefer the terminal? The same run renders as the **ASCII map** shown above — that's exactly what Claude pastes inline, and it has a live `--watch` too.
+
+---
+
+## Without Claude Code (standalone CLI)
+
+The runner and viewer work on their own — no Claude Code required.
 
 ```bash
-# Author or reuse a workflow script (the DSL is documented in references/authoring.md),
-# then run it against Codex — pinning all agents to the latest frontier model:
-node runner/bin/run-workflow.js examples/demo/nimbus-landing-redesign.workflow.js --frontier
+# Run a workflow script against Codex (pin the frontier model, auto-scale effort):
+node runner/bin/run-workflow.js examples/review.workflow.js --frontier --auto-effort \
+  --sandbox read-only --args '{"files":["src/auth.ts"],"focus":"missing auth checks"}'
+# progress streams on stderr; the workflow's return value prints as JSON on stdout
 
-# Progress streams on stderr; the workflow's return value prints as JSON on stdout.
+# Watch it live (browser, terminal, or both):
+node runner/bin/run-workflow.js examples/market-news.workflow.js --frontier --auto-effort --gui
+
+# Turn any past run into the viewer (HTML, or a terminal ASCII map):
+node runner/bin/view-run.js <project-dir> --open       # add --watch for live
+node runner/bin/map-run.js  <project-dir> --watch
 ```
 
-Useful flags: `--frontier` (pin all agents to the auto-detected latest frontier
-model), `--auto-effort` (scale effort to layer width — lone judge/synthesize gates
-think hardest), `--plan` (dry-run agent count + budget estimate, no tokens),
-`--sandbox read-only|workspace-write`, `--budget N` (token ceiling) with
-`--budget-meter total|output`, `--tui` / `--gui` / `--monitor` (watch the run live —
-terminal map, browser viewer, or both), `--resume` (reuse a prior run's results from
-the journal). See `runner/bin/run-workflow.js --help`.
+Key flags: `--frontier` (pin the latest frontier model), `--auto-effort` (scale effort to layer width), `--plan` (dry-run agent count + budget estimate, no tokens), `--budget N` (token ceiling) with `--budget-meter total|output`, `--sandbox read-only|workspace-write`, `--tui` / `--gui` / `--monitor` (live monitors), `--resume`. See `node runner/bin/run-workflow.js --help`.
 
-A minimal script:
+A minimal workflow script (the DSL — `agent` / `parallel` / `pipeline` / `phase` / `budget` / `args` — is documented in [`references/authoring.md`](references/authoring.md), with runnable templates in [`examples/`](examples)):
 
 ```js
 export const meta = { name: "hello", description: "two agents in parallel", phases: [{ title: "Answer" }] };
@@ -127,234 +197,48 @@ const [a, b] = await parallel([
 return { a, b };
 ```
 
----
-
-## View a past run
-
-Every run writes a journal to `<project>/.workflow-journal/<name>.jsonl`. Turn it
-into a viewer:
-
-```bash
-node runner/bin/view-run.js <project-dir> --open
-node runner/bin/view-run.js <project-dir> --watch --open   # live: updates in place as the run grows
-# or point at a journal / script explicitly:
-node runner/bin/view-run.js --journal path/to.jsonl --script path/to.workflow.js --out run.html
-```
-
-Prefer the terminal? Render the same run as an **ASCII execution map**, with a
-live `--watch` that redraws in place as the run progresses:
-
-```bash
-node runner/bin/map-run.js <project-dir>           # one-shot ASCII map
-node runner/bin/map-run.js <project-dir> --watch   # live: redraws as the journal grows
-```
-
-```text
-╭─ ◆ market-news ──────────────────────────────────────────────────────────────╮
-│ ✓✓✓✓✓✓  6/6 done · 2 phases · 701k tok · 20m27s · gpt-5.5                    │
-╰──────────────────────────────────────────────────────────────────────────────╯
-  │
-  ▼ ① Gather ───────────────────────────────────  5 agents · 622k tok · 17m38s
-      AGENT      MODEL    EFFORT  TOKENS    WALL
-  ├─✓ indices    gpt-5.5  high       52k   1m26s
-  │   S&P 500 rose 0.4% to a record 6,012; Nasdaq +0.6% and Dow +0.3% at the
-  │   June 2 close.
-  ├─✓ movers     gpt-5.5  high      140k   5m16s
-  │   Nvidia gained ~3% on AI demand; a major retailer slid 8% after cutting
-  │   guidance.
-  ╰─✓ catalysts  gpt-5.5  high      128k   3m27s
-      Several megacap earnings beat after the bell; Fed speakers stayed
-      data-dependent.
-  ┄ barrier · Gather → Synthesize ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
-  ▼ ② Synthesize ──────────────────────────────────  1 agent · 79k tok · 2m49s
-  ╰─✓ brief      gpt-5.5  xhigh      79k   2m49s
-      Fed, jobs and AI earnings kept stocks near records into June 3.
-  │
-  ▼
-╭─ ✦ result ───────────────────────────────────────────────────────────────────╮
-│ Fed, jobs and AI earnings kept stocks near records, but June 3 closing       │
-│ levels were not yet final at midday.                                         │
-╰──────────────────────────────────────────────────────────────────────────────╯
-```
-
-The viewer has two layouts (toggle top-right), a **Dark / Light** theme switch, and
-works for any run shape. Every agent's **tokens, time, model, and effort** (recorded
-by the runner) show at agent, phase, and run level.
-
-- **◇ Map** — the execution map: orchestrator → one row of parallel agents per phase
-  → barrier merges → **result**. Each agent node carries its model, time, and tokens;
-  it opens at a readable 100%, centered — **Fit** (`F`) frames the whole graph, `0`
-  resets to 100%, scroll zooms toward the cursor, drag pans. Wide fan-outs (more than
-  ~12 agents in a phase) fold into an **aggregate node** (`+N more`, with the hidden
-  agents' running count and token total) that you expand inline — running agents are
-  never hidden. Click any node, or the **result** node, for a slide-in **inspector**
-  that *docks beside* the graph (the map stays visible behind it) and shows the full
-  structured result.
-- **☰ Tree** — a dense `Run → Phase → Agent` inspector: each phase row shows a
-  **progress bar** with `done/total`, each agent row shows its time, tokens, and
-  model inline, and the run's actual **returned value** renders at the top — so you
-  can read the whole run without opening a single node:
-
-![Tree view](docs/tree.png)
-
-Both views render results generically (arrays-of-objects → tables with sticky
-headers, `palette` → color swatches, `severity`/`effort` → badges, 1–10 scores →
-pills, plus a raw-JSON toggle) and handle flat label-less runs, huge fan-outs,
-journal-only runs (no model chips), and string/null results. The **result** node
-shows the workflow's real return value when the runner captured it — not a heuristic
-guess at a "final" agent.
-
-The whole viewer is **keyboard-navigable** — Tab between nodes, Enter/Space to open
-the inspector, arrows to expand/collapse phases, **Esc** to close — with visible
-focus rings, and it respects `prefers-reduced-motion`.
-
-### Live, in place — no reload
-
-Add **`--watch`** and the viewer becomes a live monitor that updates **without ever
-reloading the page**. As the run progresses it patches the DOM in place: running
-agents appear amber with a **ticking elapsed clock** (and amber edges through the
-phase that's still working), finished agents flip to their result, and a status
-strip tracks **wall-clock, last-update age, and a running count**. Your view is never
-yanked: the theme, the Map/Tree toggle, the open inspector, scroll position, and map
-zoom/pan all survive every update — an inspector left open on a still-running agent
-fills in *in place* the moment that agent's result lands. When the run finishes the
-strip retires and the page settles into the static, shareable artifact.
-
-It stays a **single self-contained file**: the live channel writes tiny sidecar files
-next to the HTML and pulls them with a script tag (not `fetch`), so it updates live
-even when opened straight from disk as a `file://` — no server, no network.
-
----
-
-## Watch a run build live
-
-One command fans out agents to gather **today's US stock-market news** and shows
-the run building as a live ASCII map. Agents appear as **running** (spinner +
-elapsed) the moment they start and flip to `✓` with their tokens/time when they
-finish; the footer tracks wall-clock and a live done/running count. It exits on its
-own when the run finishes (needs `codex login`; the agents use **live web access**,
-and a web-research run takes a few minutes):
-
-```bash
-npm run demo:live
-# or a different example / inputs:
-node runner/bin/demo-live.js --script examples/triage.workflow.js --args '{"items":[{"id":"1","text":"crash on empty config"}]}'
-```
-
-Mid-run, completed agents show their finding (a 1–2 sentence snippet of what they
-returned) while the rest are still in flight:
-
-```text
-╭─ ◆ market-news ──────────────────────────────────────────────────────────────╮
-│ ✓✓⠋⠋⠋  2/5 done · 3 running · 1 phase · 218k tok · 4m53s · gpt-5.5           │
-╰──────────────────────────────────────────────────────────────────────────────╯
-  │
-  ▼ ① Gather ──────────────────────────  2 done · 3 running · 218k tok · 4m53s
-      AGENT      MODEL    EFFORT  TOKENS    WALL
-  ├─✓ indices    gpt-5.5  high       52k   1m26s
-  │   S&P 500 rose 0.4% to a record 6,012; Nasdaq +0.6% and Dow +0.3% at the
-  │   June 2 close.
-  ├─✓ sectors    gpt-5.5  high      166k   3m27s
-  │   Technology and communication services led; energy and utilities lagged.
-  ├─⠋ movers     gpt-5.5  high        --   6m00s
-  ├─⠋ macro      gpt-5.5  high        --   6m00s
-  ╰─⠋ catalysts  gpt-5.5  high        --   6m00s
-  │
-  ▼
-╭─ ✦ result ───────────────────────────────────────────────────────────────────╮
-│ in progress…                                                                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
-```
-
-As each agent finishes, its spinner flips to `✓` and its snippet appears; a barrier
-holds, then a lone `synthesize` agent writes the cited brief that becomes the
-result node.
-
-Or just add **`--tui`** / **`--gui`** to any `run-workflow.js` invocation and it
-auto-opens a live monitor that tracks the run as it goes — `--tui` opens the ASCII
-map in a new terminal window, `--gui` opens the HTML viewer in your browser,
-`--monitor` opens both. Each shows **every agent, running + done**, with constant
-updates — the browser viewer patches in place (no flicker, no reload) and settles to
-the finished run automatically when it's done:
-
-```bash
-node runner/bin/run-workflow.js examples/market-news.workflow.js --frontier --auto-effort --gui --tui \
-  --args '{"date":"today"}'
-```
-
-To wire it up by hand against any run — run the workflow in one terminal and watch
-in another, both pointed at the **same journal**:
-
-```bash
-# terminal A — run, writing a known journal path
-node runner/bin/run-workflow.js examples/tournament-sort.workflow.js --frontier --auto-effort \
-  --sandbox read-only --journal /tmp/run.jsonl \
-  --args '{"criterion":"most likely to be a flaky test","bucketSize":3,"items":["test_login asserts on Date.now()","test_api retries 3x on 500","test_math pure arithmetic"]}'
-
-# terminal B — live map (pre-create the journal so the watcher can attach first)
-: > /tmp/run.jsonl
-node runner/bin/map-run.js --journal /tmp/run.jsonl --watch
-```
+There's also a one-command live demo (needs `codex login`): `npm run demo:live` fans out agents to gather today's US market news and shows the run building as a live ASCII map.
 
 ---
 
 ## How it works
 
-Claude Code's workflow runtime is sealed inside its binary, so this is an **external
-re-host** of the DSL. The only provider-specific piece is `agent()`:
+Claude Code's workflow runtime is sealed inside its binary, so this is an **external re-host** of the DSL. The only provider-specific piece is `agent()`:
 
 | Workflow concept | Codex mapping |
 | :--- | :--- |
 | `agent(prompt)` → final text | `thread/start` + `turn/start`, last `agentMessage.text` |
-| `agent(prompt, { schema })` | native `turn/start.outputSchema` → parsed JSON |
+| `agent(prompt, { schema })` | native `turn/start.outputSchema` (auto-normalized for strict mode) → parsed JSON |
 | `agentType: 'x'` | loads `.claude/agents/x.md` → `developerInstructions` |
 | Claude model id / alias | remapped to an available Codex model via `model/list` |
 | sandbox / permissions | `approvalPolicy:"never"` + sandbox |
 | transient errors | retry with backoff; app-server auto-reconnect |
 | `parallel` / `pipeline` / `phase` / `budget` | unchanged — provider-neutral JS |
 
-Workflow scripts run in an isolated `node:vm` context (no `fs`/`process`/`fetch`;
-non-deterministic builtins blocked) — the agents do the I/O, the script coordinates.
-A resume journal caches each completed agent so reruns skip unchanged work.
+Workflow scripts run in an isolated `node:vm` context (no `fs`/`process`/`fetch`; non-deterministic builtins blocked) — the agents do the I/O, the script coordinates. A resume journal caches each completed agent so reruns skip unchanged work.
 
-Full internals, the protocol mapping, and a faithfulness comparison vs. the native
-runtime are in [`references/runner-readme.md`](references/runner-readme.md). The
-DSL + authoring patterns are in [`references/authoring.md`](references/authoring.md).
+Full internals, the protocol mapping, and a faithfulness comparison vs. the native runtime are in [`references/runner-readme.md`](references/runner-readme.md). The DSL + authoring patterns are in [`references/authoring.md`](references/authoring.md).
 
 ---
 
 ## Requirements & compatibility
 
 - **Node ≥ 18**, zero npm dependencies.
-- A logged-in **`codex` CLI** with the `app-server` subcommand. Built and verified
-  against `codex` **0.135.0**; method names/shapes are stable, but you can regenerate
-  bindings for your version with `codex app-server generate-json-schema --out DIR`.
+- A logged-in **`codex` CLI** with the `app-server` subcommand. Built and verified against `codex` **0.135.0**; method names/shapes are stable, but you can regenerate bindings for your version with `codex app-server generate-json-schema --out DIR`.
 
 ## Safety
 
-Workflow agents run with `approvalPolicy: "never"` inside a Codex sandbox (default
-`sandbox: workspace-write`) — like any autonomous agent run, they read, write, and
-execute shell commands **without prompting**. Run untrusted or exploratory tasks
-with `--sandbox read-only`, and read a workflow script before you run it. The
-workflow *script itself* is isolated (no filesystem/network/process access) — only
-the agents act.
+Workflow agents run with `approvalPolicy: "never"` inside a Codex sandbox (default `sandbox: workspace-write`) — like any autonomous agent run, they read, write, and execute shell commands **without prompting**. For untrusted or exploratory tasks, tell Claude to keep it **read-only** (or pass `--sandbox read-only`), and read a workflow script before you run it. The workflow *script itself* is isolated (no filesystem/network/process access) — only the agents act.
 
 ## Limitations (honest)
 
-- This is a **standalone re-host**, not the in-Claude-Code experience: no in-session
-  background tasks, no `/workflows` TUI, no save-as-`/command` — though `--watch`
-  gives a live viewer and `workflow("name")` resolves saved workflows from
-  `.claude/workflows/`.
-- A couple of native nuances aren't replicated 1:1: **warm-context resume** (the
-  journal replays *results*, not Codex thread state via `thread/fork`), and budget
-  accounting is per-process (`--budget-meter` selects total vs the native
-  output-token pool). The map models barrier/phase structure (a clean
-  approximation for pipeline-shaped runs). Details in the internals doc.
+- This is a **standalone re-host**, not the in-Claude-Code-native experience: no in-session background tasks, no `/workflows` progress UI, no save-as-`/command` — though the live viewer and inline map cover monitoring, and `workflow("name")` resolves saved workflows from `.claude/workflows/`.
+- A couple of native nuances aren't replicated 1:1: **warm-context resume** (the journal replays *results*, not Codex thread state via `thread/fork`), and budget accounting is per-process (`--budget-meter` selects total vs the native output-token pool). The map models barrier/phase structure (a clean approximation for pipeline-shaped runs). Details in the internals doc.
 
 ## Development
 
 ```bash
-npm test        # offline unit checks + viewer robustness across run shapes (no Codex, no network)
+npm test        # offline unit checks + viewer/map robustness across run shapes (no Codex, no network)
 npm run doctor  # verify the local Codex App Server is reachable & logged in
 npm run demo    # open the bundled sample run in the viewer
 ```
@@ -367,15 +251,16 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 SKILL.md                  the Claude Code skill (manual-invoke /codex-workflows)
 runner/                   standalone runner (Node, zero deps)
   bin/run-workflow.js     execute a workflow script on Codex
-  bin/view-run.js         generate the HTML run viewer
+  bin/view-run.js         generate the HTML run viewer (--watch for live)
   bin/map-run.js          render the run as an ASCII map in the terminal (--watch)
   bin/demo-live.js        run an example + watch it build live (npm run demo:live)
   src/                    codexAgent (the seam) + runtime, transport, helpers
   src/runModel.js         shared run-model assembly (HTML + ASCII viewers)
   src/asciiMap.js         ASCII map renderer
-  test/                   offline + view-run + map-run robustness + handshake
-references/               authoring.md (DSL) · runner-readme.md (internals)
-examples/                 market-news · hello · review · bug-hunt · review-gates · tournament-sort · triage · classify-route · deep-research · demo/
+  test/                   offline + view-run + view-run.live + map-run + handshake
+references/               authoring.md (DSL + patterns) · runner-readme.md (internals)
+examples/                 hello · review · bug-hunt · review-gates · deep-research ·
+                          market-news · tournament-sort · triage · classify-route · demo/
 docs/                     screenshots
 ```
 
