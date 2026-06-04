@@ -8,13 +8,18 @@
 // Progress is written to stderr; the workflow's return value is printed as JSON
 // to stdout, so you can pipe it:  run-workflow wf.js | jq .
 
-import { resolve, basename } from "node:path";
-import { readFileSync } from "node:fs";
+import { resolve, basename, dirname, join } from "node:path";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { runWorkflowFile } from "../src/runWorkflow.js";
 import { getClient, shutdownClient } from "../src/codexAgent.js";
 import { pickFrontier } from "../src/modelMap.js";
 import { Journal } from "../src/journal.js";
+import { eventsPathFor } from "../src/runModel.js";
+
+const BIN_DIR = dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
   const out = {
@@ -30,6 +35,8 @@ function parseArgs(argv) {
     pinEffort: null,
     budgetMeter: "total",
     plan: false,
+    tui: false,
+    gui: false,
     retries: null,
     journal: undefined,
     resume: false,
@@ -52,6 +59,9 @@ function parseArgs(argv) {
     else if (a === "--pin-effort") out.pinEffort = rest[++i];
     else if (a === "--budget-meter") out.budgetMeter = rest[++i];
     else if (a === "--plan" || a === "--dry-run") out.plan = true;
+    else if (a === "--tui") out.tui = true;
+    else if (a === "--gui") out.gui = true;
+    else if (a === "--monitor") { out.tui = true; out.gui = true; }
     else if (a === "--retries") out.retries = Number(rest[++i]);
     else if (a === "--journal") out.journal = rest[++i];
     else if (a === "--resume") out.resume = true;
@@ -71,8 +81,11 @@ if (opts.help || !opts.script) {
       "  [--budget N] [--budget-meter total|output] [--model M] [--frontier | --pin-model M]\n" +
       "  [--effort none|minimal|low|medium|high|xhigh] [--auto-effort | --pin-effort E]\n" +
       "  [--sandbox read-only|workspace-write|danger-full-access] [--retries N]\n" +
-      "  [--plan] [--resume] [--journal PATH] [--fresh] [--no-journal]\n" +
+      "  [--plan] [--tui] [--gui] [--resume] [--journal PATH] [--fresh] [--no-journal]\n" +
       "\n" +
+      "  --tui            open a live ASCII map of the run in a new terminal window\n" +
+      "  --gui            open a live HTML viewer of the run in your browser\n" +
+      "                   (--monitor opens both; each shows running + done agents live)\n" +
       "  --frontier       pin ALL agents to the latest frontier model (auto-detected),\n" +
       "                   overriding any per-call model in the script\n" +
       "  --pin-model M    pin ALL agents to model M, overriding any per-call model\n" +
@@ -148,6 +161,23 @@ function suggestResumeCmd(argv, higher) {
   }
   out.push("--resume", "--budget", String(higher));
   return `node ${argv[1]} ${out.join(" ")}`;
+}
+
+// Open the live ASCII map in a NEW terminal window (it needs its own TTY for the
+// alternate-screen redraw). macOS uses Terminal via osascript; elsewhere we print
+// the command to run. The window persists after the run (Ctrl-C there to close).
+function openTuiWindow(journalAbs) {
+  const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+  const cmd = `node ${shq(join(BIN_DIR, "map-run.js"))} --journal ${shq(journalAbs)} --watch`;
+  if (process.platform === "darwin") {
+    const osa = (s) => '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+    try {
+      spawn("osascript", ["-e", `tell application "Terminal" to do script ${osa(cmd)}`, "-e", 'tell application "Terminal" to activate'], { stdio: "ignore", detached: true }).unref();
+      console.error("🖥  TUI monitor: live map opening in a new Terminal window…");
+      return;
+    } catch {}
+  }
+  console.error("🖥  TUI monitor — run this in another terminal for a live map:\n   " + cmd);
 }
 
 // `defaultModel` is the fallback model when neither a script opt nor an
@@ -232,8 +262,10 @@ if (pinnedModel) console.error(`⊙ pinning all agents to model: ${pinnedModel}`
 // Resume journal: on by default (write-only); --resume reuses prior results,
 // --no-journal disables, --journal overrides the path, --fresh discards first.
 let journal = null;
+let onEvent;
+let journalPath = null;
 if (!opts.noJournal) {
-  const journalPath =
+  journalPath =
     opts.journal ?? `.workflow-journal/${basename(opts.script).replace(/\.[cm]?js$/, "")}.jsonl`;
   if (opts.fresh) await rm(journalPath, { force: true });
   journal = new Journal(journalPath, { reuse: opts.resume });
@@ -241,6 +273,31 @@ if (!opts.noJournal) {
   console.error(
     opts.resume ? `↻ resuming from journal: ${journalPath}` : `✎ journal: ${journalPath}`,
   );
+
+  // Lifecycle events sidecar (live observability) — separate from the resume
+  // journal, truncated fresh each run, best-effort so it never blocks the run.
+  const eventsPath = eventsPathFor(journalPath);
+  try { writeFileSync(eventsPath, ""); } catch {}
+  onEvent = (e) => {
+    try { appendFileSync(eventsPath, JSON.stringify({ t: Date.now(), ...e }) + "\n"); } catch {}
+  };
+}
+
+// --tui / --gui: open a live monitor that watches this run's journal + events as
+// it progresses — a new Terminal window with the live ASCII map (--tui) and/or the
+// HTML viewer in your browser (--gui). Spawned before the run so it's up from the
+// first agent. Both show every agent (running + done) with constant updates.
+let guiChild = null;
+if ((opts.tui || opts.gui) && journalPath) {
+  const abs = resolve(journalPath);
+  try { mkdirSync(dirname(abs), { recursive: true }); if (!existsSync(abs)) writeFileSync(abs, ""); } catch {}
+  if (opts.gui) {
+    guiChild = spawn("node", [join(BIN_DIR, "view-run.js"), "--journal", abs, "--watch", "--open"], { stdio: "ignore" });
+    console.error("🖥  GUI monitor: live HTML viewer opening in your browser…");
+  }
+  if (opts.tui) openTuiWindow(abs);
+} else if ((opts.tui || opts.gui) && !journalPath) {
+  console.error("note: --tui/--gui need the journal; ignored with --no-journal");
 }
 
 const onPhase = (title) => console.error(`\n━━ ${title} ━━`);
@@ -258,6 +315,7 @@ try {
     pinnedEffort,
     onPhase,
     onLog,
+    onEvent,
     journal,
   });
   console.error("\n─── result ───");
@@ -274,4 +332,10 @@ try {
   process.exitCode = 1;
 } finally {
   await shutdownClient();
+  if (guiChild) {
+    try { guiChild.kill(); } catch {}
+    // Settle the browser on a static final render (stops the 2s auto-refresh).
+    try { spawnSync("node", [join(BIN_DIR, "view-run.js"), "--journal", resolve(journalPath)], { stdio: "ignore" }); } catch {}
+  }
+  if (opts.tui) console.error("ℹ  the TUI monitor window keeps running — Ctrl-C there to close it.");
 }

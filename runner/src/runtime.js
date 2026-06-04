@@ -129,6 +129,7 @@ export function createRuntime({
   onPhase,
   onLog,
   onAgentPlan, // dry-run sink: receives { label, phase, effort, width, schema } per agent
+  onEvent, // lifecycle sink: { type:'start'|'end'|'cached', label, phase, ... } for live viewers
   journal = null,
   runAgent = codexAgent, // seam: injected in tests to capture resolved opts
 } = {}) {
@@ -188,24 +189,34 @@ export function createRuntime({
       : null;
     if (key && journal.hit(key)) {
       onLog?.(`  ◦ agent (cached): ${label}`);
+      onEvent?.({ type: "cached", label, phase: effectivePhase });
       return journal.get(key);
     }
 
+    const reqModel = pinnedModel ?? opts.model ?? defaultModel ?? null;
     const effortTag = merged.effort
       ? `  ⟪${merged.effort}${effortSrc === "auto" ? `·layer×${width}` : ""}⟫`
       : "";
     onLog?.(`  · agent: ${label}${opts.schema ? "  [schema]" : ""}${effortTag}`);
+    // Emit a lifecycle 'start' so live viewers can show this agent as running.
+    onEvent?.({ type: "start", label, phase: effectivePhase, effort: merged.effort ?? null, model: reqModel });
     // Capture per-agent metrics off a side channel (the model-facing return value
     // is unchanged); fold them into the journal entry alongside phase/effort/model.
     let metrics = null;
     const result = await pooled(() =>
       runAgent(prompt, { ...merged, defaultModel, pinnedModel, log: onLog, onMetrics: (m) => { metrics = m; } }),
     );
+    onEvent?.({
+      type: "end", label, phase: effectivePhase, effort: merged.effort ?? null,
+      model: metrics?.model ?? reqModel,
+      tokens: metrics?.tokens?.total ?? null,
+      ms: metrics?.ms ?? null,
+    });
     if (key) {
       await journal.record(key, label, result, {
         phase: effectivePhase,
         effort: merged.effort ?? null,
-        model: metrics?.model ?? (pinnedModel ?? opts.model ?? defaultModel) ?? null,
+        model: metrics?.model ?? reqModel,
         tokens: metrics?.tokens?.total ?? null,
         tokensOut: metrics?.tokens ? metrics.tokens.output + metrics.tokens.reasoning : null,
         ms: metrics?.ms ?? null,
@@ -297,6 +308,7 @@ export function createRuntime({
       onPhase,
       onLog,
       onAgentPlan,
+      onEvent,
       journal,
       nested: true,
     });

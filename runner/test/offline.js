@@ -371,4 +371,27 @@ const exec = promisify(execFile);
   assert.match(versionDriftNote("0.140.0", "0.135.0"), /0\.140\.0[\s\S]*0\.135\.0/, "drift -> warns with both versions");
 }
 
+// 21) lifecycle events: a start + end per agent, carrying phase/effort/metrics.
+{
+  const events = [];
+  const echo = async (_p, o) => {
+    o.onMetrics?.({ ms: 10, model: "gpt-5.5", tokens: { input: 1, output: 1, reasoning: 0, total: 2 } });
+    return "ok";
+  };
+  await runWorkflowSource(
+    'export const meta={name:"e"}; phase("Scan"); await agent("a"); await parallel([()=>agent("b"),()=>agent("c")]); return 1;',
+    { runAgent: echo, autoEffort: true, onEvent: (e) => events.push(e) },
+  );
+  const starts = events.filter((e) => e.type === "start");
+  const ends = events.filter((e) => e.type === "end");
+  assert.equal(starts.length, 3, "one start per agent");
+  assert.equal(ends.length, 3, "one end per agent");
+  assert.equal(starts[0].label, "a");
+  assert.equal(starts[0].phase, "Scan", "start carries the phase");
+  assert.equal(starts[0].effort, "xhigh", "start carries the resolved effort (lone agent)");
+  assert.equal(ends[0].label, "a");
+  assert.equal(ends[0].ms, 10, "end carries per-agent metrics");
+  assert.equal(ends[0].tokens, 2);
+}
+
 console.log("offline checks passed ✓");

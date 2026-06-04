@@ -54,7 +54,9 @@ skill). It is dependency-free Node ≥ 18.
    ```
    Progress streams on **stderr**; the workflow's return value prints as JSON on
    **stdout**. Capture stdout for the result (`… 1>/tmp/result.json`) when it's
-   large.
+   large. If the user wants to **watch the run live**, add `--tui` (live ASCII map
+   in a new terminal window) and/or `--gui` (live HTML viewer in the browser) — see
+   *Running → Live monitoring*.
 
 4. **Surface** the result to the user — summarize it, and mention the script
    path so they can rerun or tweak it.
@@ -185,10 +187,21 @@ run-workflow <script.js>
   --budget N       token ceiling backing budget.total / budget.remaining()
   --budget-meter M what budget.spent() counts: total (default) | output (native pool)
   --plan           dry run: count agents per phase/effort + estimate a --budget (no tokens)
+  --tui            open a LIVE ASCII map of the run in a new terminal window
+  --gui            open a LIVE HTML viewer of the run in your browser (--monitor = both)
   --retries N      transient-error retries per agent (default 3)
   --resume         reuse prior results from the journal (skip unchanged agents)
   --journal PATH | --fresh | --no-journal
 ```
+
+- **Live monitoring (`--tui` / `--gui`)** — when the user wants to *watch* the run,
+  add `--tui` and/or `--gui`. The runner auto-opens a live monitor that tracks the
+  journal + event stream as the run progresses, showing **every agent (running +
+  done)** with constant updates: `--tui` opens the ASCII execution map in a new
+  terminal window; `--gui` opens the self-contained HTML viewer in the browser;
+  `--monitor` opens both. They run alongside the workflow (which still prints its
+  result JSON to stdout as usual), so pass them in addition to `--frontier
+  --auto-effort`. Both need journaling (not `--no-journal`).
 
 - **Cost** — a run can spawn many agents and use real tokens. Keep the single
   frontier model (see *Model*) and bound cost with `--auto-effort` (already
@@ -257,6 +270,13 @@ To inspect it as a polished GUI, generate a self-contained HTML viewer:
 
 ```bash
 node ~/.claude/skills/codex-workflows/runner/bin/view-run.js <project-dir> --open
+```
+
+For a terminal-native view (no browser), render the run as an **ASCII map** —
+add `--watch` to redraw it live as the run progresses:
+
+```bash
+node ~/.claude/skills/codex-workflows/runner/bin/map-run.js <project-dir> [--watch]
 ```
 
 It auto-finds the journal and the `*.workflow.js` script in that dir (or pass

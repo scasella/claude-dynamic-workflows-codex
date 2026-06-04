@@ -8,3 +8,6 @@ node_modules/
 .workflow-journal/
 !examples/demo/.workflow-journal/
 !examples/demo/.workflow-journal/**
+
+# Lifecycle event sidecars (live-viewer observability) are runtime-only, never committed
+*.events.jsonl

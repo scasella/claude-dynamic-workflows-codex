@@ -13,9 +13,10 @@
 //
 // Emits a single .html file (data embedded inline) and prints its path.
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, dirname, basename, resolve, isAbsolute } from "node:path";
+import { writeFileSync, statSync } from "node:fs";
+import { join, basename, resolve } from "node:path";
 import { execFile } from "node:child_process";
+import { locateRun, buildLiveRunModel, eventsPathFor } from "../src/runModel.js";
 
 // ── args ──────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
@@ -43,182 +44,12 @@ if (opts.help || (!opts.target && !opts.journal)) {
   process.exit(opts.help ? 0 : 1);
 }
 
-// ── locate journal + script ─────────────────────────────────────────────────
-const target = opts.target ? resolve(opts.target) : null;
-let journalPath = opts.journal ? resolve(opts.journal) : null;
-let runDir = null;
-
-if (!journalPath && target) {
-  if (target.endsWith(".jsonl") && existsSync(target)) {
-    journalPath = target;
-  } else if (existsSync(target)) {
-    runDir = target;
-    const jdir = join(target, ".workflow-journal");
-    if (existsSync(jdir)) {
-      const jsonls = readdirSync(jdir).filter((f) => f.endsWith(".jsonl"));
-      if (jsonls.length) journalPath = join(jdir, jsonls.sort()[0]);
-    }
-  }
-}
-if (!journalPath || !existsSync(journalPath)) {
-  console.error(`No journal found. Looked at: ${journalPath ?? target}`);
-  process.exit(1);
-}
-runDir = runDir ?? dirname(dirname(journalPath)); // .workflow-journal/<f> → run dir
-
-// script: explicit, else <runDir>/<journalBaseName>.js (journal is <name>.jsonl, name often ends .workflow)
-let scriptPath = opts.script ? resolve(opts.script) : null;
-if (!scriptPath) {
-  const base = basename(journalPath).replace(/\.jsonl$/, ""); // e.g. design-review.workflow
-  for (const cand of [join(runDir, base + ".js"), join(runDir, base)]) {
-    if (existsSync(cand)) { scriptPath = cand; break; }
-  }
-}
-
-// ── run-model assembly ──────────────────────────────────────────────────────
-// `meta`/`specs`/`metaPhases` are module-level so the helpers below and a
-// --watch rebuild share them; assembleRun() (re)populates everything from disk.
-let meta = null;
-let specs = [];
-let metaPhases = [];
-
-function extractMeta(src) {
-  const m = src.match(/^[ \t]*export[ \t]+const[ \t]+meta[ \t]*=[ \t]*/m);
-  if (!m) return null;
-  const open = src.indexOf("{", m.index + m[0].length);
-  if (open === -1) return null;
-  let depth = 0, end = -1;
-  for (let j = open; j < src.length; j++) {
-    const c = src[j];
-    if (c === "{") depth++;
-    else if (c === "}") { depth--; if (depth === 0) { end = j; break; } }
-  }
-  if (end === -1) return null;
-  try { return new Function("return (" + src.slice(open, end + 1) + ")")(); } catch { return null; }
-}
-
-// Pull literal label-prefix / phase / model / effort from each flat agent() opts object.
-function parseAgentSpecs(src) {
-  const found = [];
-  // Match a flat agent-opts object that contains `label:`. Tolerates one level of
-  // nested braces so template-literal labels like `audit:${l.key}` don't break it.
-  const re = /\{((?:[^{}]|\{[^{}]*\})*\blabel\s*:(?:[^{}]|\{[^{}]*\})*)\}/g;
-  let m;
-  const grab = (body, key) => {
-    const mm = body.match(new RegExp(key + "\\s*:\\s*[`'\"]([^`'\"$]*)"));
-    return mm ? mm[1] : undefined;
-  };
-  while ((m = re.exec(src))) {
-    const labelStart = grab(m[1], "label");
-    if (labelStart === undefined) continue;
-    found.push({
-      labelStart,
-      phase: grab(m[1], "phase"),
-      model: grab(m[1], "model"),
-      effort: grab(m[1], "effort"),
-    });
-  }
-  return found;
-}
-
-function specFor(label) {
-  let best = null;
-  for (const s of specs) {
-    if (s.labelStart && label.startsWith(s.labelStart)) {
-      if (!best || s.labelStart.length > best.labelStart.length) best = s;
-    }
-  }
-  return best;
-}
-
-function phaseForLabel(label, spec) {
-  if (spec && spec.phase) return spec.phase;
-  if (label.includes(":")) {
-    const prefix = label.split(":")[0];
-    // match a meta phase whose title shares the prefix (case-insensitive)
-    const mt = metaPhases.find((p) => p.title && p.title.toLowerCase().startsWith(prefix.toLowerCase()));
-    return mt ? mt.title : prefix.charAt(0).toUpperCase() + prefix.slice(1);
-  }
-  // No phase signal (no `phase` opt, no `prefix:` label) — group flat runs together
-  // rather than exploding into one phase per agent.
-  return "Agents";
-}
-
-// Read the journal + script from disk and assemble the run model the viewer
-// renders. Repopulates the module-level meta/specs/metaPhases caches, so a
-// --watch loop can call it again as the journal grows.
-function assembleRun() {
-  // journal is append-only; keep the latest entry per key (resume can re-record).
-  const byKey = new Map();
-  for (const line of readFileSync(journalPath, "utf8").trim().split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const e = JSON.parse(line);
-      if (e && e.label) byKey.set(e.key ?? e.label, e);
-    } catch {}
-  }
-  const agentsRaw = [...byKey.values()];
-
-  // script (meta + per-agent opts), best-effort — the fallback for journals that
-  // predate the per-agent metric fields.
-  meta = null;
-  specs = [];
-  if (scriptPath && existsSync(scriptPath)) {
-    const scriptText = readFileSync(scriptPath, "utf8");
-    meta = extractMeta(scriptText);
-    specs = parseAgentSpecs(scriptText);
-  }
-  metaPhases = (meta && Array.isArray(meta.phases) ? meta.phases : []).map((p) =>
-    typeof p === "string" ? { title: p } : { title: p.title, detail: p.detail },
-  );
-
-  // Prefer the per-agent fields the runtime now persists (phase/model/effort/
-  // tokens/ms); fall back to script regex + label heuristics for older journals.
-  const agents = agentsRaw.map((e, i) => {
-    const spec = specFor(e.label);
-    return {
-      label: e.label,
-      order: i,
-      phase: e.phase ?? phaseForLabel(e.label, spec),
-      model: e.model ?? spec?.model ?? null,
-      effort: e.effort ?? spec?.effort ?? null,
-      tokens: typeof e.tokens === "number" ? e.tokens : null,
-      ms: typeof e.ms === "number" ? e.ms : null,
-      result: e.result,
-    };
-  });
-
-  // phases in meta order, then any extra phases that appeared in the journal
-  const phaseOrder = [];
-  for (const p of metaPhases) if (!phaseOrder.includes(p.title)) phaseOrder.push(p.title);
-  for (const a of agents) if (!phaseOrder.includes(a.phase)) phaseOrder.push(a.phase);
-
-  const models = {};
-  for (const a of agents) if (a.model) models[a.model] = (models[a.model] || 0) + 1;
-
-  const totalTokens = agents.reduce((s, a) => s + (a.tokens || 0), 0);
-  const totalMs = agents.reduce((s, a) => s + (a.ms || 0), 0);
-  const hasMetrics = agents.some((a) => a.tokens != null || a.ms != null);
-
-  return {
-    name: opts.title || (meta && meta.name) || basename(journalPath).replace(/\.workflow\.jsonl$|\.jsonl$/, ""),
-    description: (meta && meta.description) || "",
-    phases: phaseOrder.map((title) => {
-      const mp = metaPhases.find((p) => p.title === title);
-      return { title, detail: mp?.detail || "" };
-    }),
-    agents,
-    models,
-    totals: { tokens: totalTokens, ms: totalMs, hasMetrics },
-    counts: { phases: phaseOrder.length, agents: agents.length },
-    sources: {
-      journal: journalPath,
-      script: scriptPath && existsSync(scriptPath) ? scriptPath : null,
-      runDir,
-    },
-    generatedAt: new Date().toISOString(),
-  };
-}
+// ── locate the run (journal + script), shared with the ASCII map viewer ──────
+const located = locateRun({ target: opts.target, journal: opts.journal, script: opts.script });
+if (located.error) { console.error(located.error); process.exit(1); }
+const { journalPath, scriptPath, runDir } = located;
+// Assemble the run model from disk — re-callable so --watch can rebuild it.
+const buildModel = () => buildLiveRunModel({ journalPath, scriptPath, runDir, title: opts.title });
 
 // ── emit ────────────────────────────────────────────────────────────────────
 // (emit happens at the end of the file, once CSS/APP consts are initialized)
@@ -292,7 +123,12 @@ header{border-bottom:1px solid var(--border);padding:14px 20px;background:
 .pill{font-family:var(--mono);font-size:11px;padding:3px 9px;border:1px solid var(--border2);
   border-radius:999px;color:var(--muted);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .pill.ok{color:var(--green);border-color:var(--border2)}
+.pill.run{color:var(--amber);border-color:var(--border2)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.dot.amber,.sdot.amber,.msdot.amber{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+@keyframes wfpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.dot.amber,.sdot.amber,.msdot.amber{animation:wfpulse 1.2s ease-in-out infinite}
+.mnode.running{border-color:var(--amber)}
 .chip{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:5px;border:1px solid var(--border2);white-space:nowrap}
 
 /* layout */
@@ -447,8 +283,15 @@ computeModelColors();
 function plural(n,w){return n+' '+w+(n===1?'':'s');}
 // metric formatters (per-agent tokens/time the runtime now persists)
 function fmtTokens(n){if(n==null)return null;if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1)+'M';if(n>=1e3)return Math.round(n/1e3)+'k';return String(n);}
-function fmtMs(ms){if(ms==null)return null;const s=ms/1000;if(s<60)return (s<10?s.toFixed(1):Math.round(s))+'s';const m=Math.floor(s/60);return m+'m'+String(Math.round(s%60)).padStart(2,'0')+'s';}
+function fmtMs(ms){if(ms==null)return null;const sec=ms/1000;if(sec<60)return (sec<10?sec.toFixed(1):String(Math.round(sec)))+'s';const t=Math.round(sec);return Math.floor(t/60)+'m'+String(t%60).padStart(2,'0')+'s';}
 const hasMetrics=()=>RUN.totals&&RUN.totals.hasMetrics;
+// live state: agents merged from the event stream as status:'running'
+const isRunning=(a)=>a&&a.status==='running';
+const elapsedOf=(a)=>a&&a.startedAt?fmtMs(Date.now()-a.startedAt):null;
+function statusChip(a){
+  if(isRunning(a)){const e=elapsedOf(a);return h('span',{class:'pill run'}, h('span',{class:'dot amber'}), 'running'+(e?' · '+e:''));}
+  return h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed');
+}
 const phaseTokens=(t)=>agentsInPhase(t).reduce((s,a)=>s+(a.tokens||0),0);
 const phaseMs=(t)=>agentsInPhase(t).reduce((s,a)=>s+(a.ms||0),0);
 
@@ -488,7 +331,7 @@ function buildTree(){
     if(!isCol){
       const wrap=h('div',{class:'children'});
       kids.forEach(a=>{
-        const n=node({type:'agent',id:a.label},'',a.label.includes(':')?a.label.split(':').slice(1).join(':')||a.label:a.label,null,'agent',false);
+        const n=node({type:'agent',id:a.label},'',a.label.includes(':')?a.label.split(':').slice(1).join(':')||a.label:a.label,null,'agent',false,null,isRunning(a));
         if(a.model) n.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55',padding:'0 6px',fontSize:'10px',marginLeft:'auto'}},a.model.replace('gpt-','')));
         wrap.append(n);
       });
@@ -497,11 +340,11 @@ function buildTree(){
   });
   return t;
 }
-function node(target,twig,labelText,count,cls,isPhase,idx){
+function node(target,twig,labelText,count,cls,isPhase,idx,running){
   const n=h('div',{class:'node '+(cls||'')+(selKey(sel)===selKey(target)?' sel':''),
     onclick:(ev)=>{ if(isPhase && ev.target.classList.contains('tw')){collapsed[target.id]=!collapsed[target.id];render();return;} select(target); }});
   n.append(h('span',{class:'tw',onclick:isPhase?(ev)=>{ev.stopPropagation();collapsed[target.id]=!collapsed[target.id];render();}:null},twig||''));
-  if(cls==='agent') n.append(h('span',{class:'sdot'}));
+  if(cls==='agent') n.append(h('span',{class:'sdot'+(running?' amber':'')}));
   if(idx) n.append(h('span',{class:'idx'},idx));
   n.append(h('span',{class:'nlabel'},labelText));
   if(count!=null) n.append(h('span',{class:'count'},count));
@@ -670,7 +513,7 @@ function renderPhase(p){
     if(a.effort) top.append(h('span',{class:'pill'},'effort '+a.effort));
     if(a.tokens!=null) top.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
     if(a.ms!=null) top.append(h('span',{class:'pill'},fmtMs(a.ms)));
-    top.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed'));
+    top.append(statusChip(a));
     c.append(top);
     const s=summarize(a.result); if(s) c.append(h('div',{class:'prose',style:{marginTop:'8px',color:'var(--muted)'}},s));
     m.append(c);
@@ -690,7 +533,7 @@ function renderAgent(a){
   if(a.effort) chips.append(h('span',{class:'pill'},'effort · '+a.effort));
   if(a.tokens!=null) chips.append(h('span',{class:'pill'},'tokens · '+fmtTokens(a.tokens)));
   if(a.ms!=null) chips.append(h('span',{class:'pill'},'time · '+fmtMs(a.ms)));
-  chips.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed'));
+  chips.append(statusChip(a));
   m.append(chips);
   m.append(h('h2',{class:'sec'},'Result'));
   if(a.result&&typeof a.result==='object'){
@@ -727,7 +570,10 @@ function renderHeader(){
         h('button',{class:'tg'+(theme==='light'?' on':''),onclick:()=>{theme='light';render();}},'○ Light')))));
   if(RUN.description) head.append(h('div',{class:'desc'},RUN.description));
   const meta=h('div',{class:'metarow'});
-  meta.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}), RUN.counts.agents+'/'+RUN.counts.agents+' completed'));
+  const nDone=RUN.agents.filter(a=>!isRunning(a)).length, nRun=RUN.agents.length-nDone;
+  meta.append(nRun
+    ? h('span',{class:'pill run'}, h('span',{class:'dot amber'}), nDone+'/'+RUN.agents.length+' done · '+nRun+' running')
+    : h('span',{class:'pill ok'}, h('span',{class:'dot'}), nDone+'/'+RUN.agents.length+' completed'));
   meta.append(h('span',{class:'pill'},plural(RUN.counts.phases,'phase')));
   meta.append(h('span',{class:'pill'},plural(RUN.counts.agents,'agent')));
   if(hasMetrics()){
@@ -748,9 +594,10 @@ function renderFooter(){
 
 // map nodes / rows
 function agentNode(a){
-  const tip=(a.model?'['+a.model+(a.effort?' · '+a.effort:'')+'] ':'')+(a.tokens!=null?fmtTokens(a.tokens)+' tok · ':'')+(summarize(a.result)||a.label);
-  const n=h('div',{class:'mnode agent',title:tip,onclick:()=>openDrawer(a.label)});
-  n.append(h('span',{class:'msdot'}));
+  const run=isRunning(a), el=elapsedOf(a);
+  const tip=(a.model?'['+a.model+(a.effort?' · '+a.effort:'')+'] ':'')+(run?('running'+(el?' '+el:'')+' · '):(a.tokens!=null?fmtTokens(a.tokens)+' tok · ':''))+(summarize(a.result)||a.label);
+  const n=h('div',{class:'mnode agent'+(run?' running':''),title:tip,onclick:()=>openDrawer(a.label)});
+  n.append(h('span',{class:'msdot'+(run?' amber':'')}));
   n.append(h('span',{class:'mlabel'}, a.label.includes(':')?a.label.split(':').slice(1).join(':'):a.label));
   if(a.model) n.append(h('span',{class:'chip mmodel',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model.replace('gpt-','')));
   return n;
@@ -896,7 +743,7 @@ function buildDrawer(label){
   if(a.effort) chips.append(h('span',{class:'pill'},'effort · '+a.effort));
   if(a.tokens!=null) chips.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
   if(a.ms!=null) chips.append(h('span',{class:'pill'},fmtMs(a.ms)));
-  chips.append(h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed'));
+  chips.append(statusChip(a));
   chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerAgent=null;select({type:'agent',id:label});}},'open in tree ↗'));
   panel.append(chips);
   const body=h('div',{class:'drawer-body'});
@@ -944,7 +791,7 @@ render();
 const outPath =
   (opts.outPath && resolve(opts.outPath)) ||
   join(runDir, basename(journalPath).replace(/\.jsonl$/, "") + ".run.html");
-writeFileSync(outPath, renderHtml(assembleRun(), opts.watch));
+writeFileSync(outPath, renderHtml(buildModel(), opts.watch));
 console.log(outPath);
 
 if (opts.open) {
@@ -957,13 +804,15 @@ if (opts.open) {
 if (opts.watch) {
   console.error(`↻ watching ${journalPath} — rebuilding ${outPath} on change (Ctrl-C to stop)`);
   let lastSize = -1;
+  const eventsPath = eventsPathFor(journalPath);
+  const sz = (p) => { try { return statSync(p).size; } catch { return 0; } };
   const tick = () => {
-    let size = -1;
-    try { size = statSync(journalPath).size; } catch {}
+    // watch the journal (completed agents) AND the events sidecar (running agents)
+    const size = sz(journalPath) + sz(eventsPath);
     if (size !== lastSize) {
       lastSize = size;
       try {
-        writeFileSync(outPath, renderHtml(assembleRun(), true));
+        writeFileSync(outPath, renderHtml(buildModel(), true));
         console.error(`  · rebuilt (${new Date().toISOString()}) — ${size} bytes journal`);
       } catch (e) {
         console.error(`  ! rebuild failed: ${e?.message ?? e}`);

@@ -136,6 +136,42 @@ node runner/bin/view-run.js <project-dir> --open
 node runner/bin/view-run.js --journal path/to.jsonl --script path/to.workflow.js --out run.html
 ```
 
+Prefer the terminal? Render the same run as an **ASCII execution map**, with a
+live `--watch` that redraws in place as the run progresses:
+
+```bash
+node runner/bin/map-run.js <project-dir>           # one-shot ASCII map
+node runner/bin/map-run.js <project-dir> --watch   # live: redraws as the journal grows
+```
+
+```text
+╭─ ◆ market-news ──────────────────────────────────────────────────────────────╮
+│ ✓✓✓✓✓✓  6/6 done · 2 phases · 701k tok · 20m27s · gpt-5.5                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  │
+  ▼ ① Gather ───────────────────────────────────  5 agents · 622k tok · 17m38s
+      AGENT      MODEL    EFFORT  TOKENS    WALL
+  ├─✓ indices    gpt-5.5  high       52k   1m26s
+  │   S&P 500 rose 0.4% to a record 6,012; Nasdaq +0.6% and Dow +0.3% at the
+  │   June 2 close.
+  ├─✓ movers     gpt-5.5  high      140k   5m16s
+  │   Nvidia gained ~3% on AI demand; a major retailer slid 8% after cutting
+  │   guidance.
+  ╰─✓ catalysts  gpt-5.5  high      128k   3m27s
+      Several megacap earnings beat after the bell; Fed speakers stayed
+      data-dependent.
+  ┄ barrier · Gather → Synthesize ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+  ▼ ② Synthesize ──────────────────────────────────  1 agent · 79k tok · 2m49s
+  ╰─✓ brief      gpt-5.5  xhigh      79k   2m49s
+      Fed, jobs and AI earnings kept stocks near records into June 3.
+  │
+  ▼
+╭─ ✦ result ───────────────────────────────────────────────────────────────────╮
+│ Fed, jobs and AI earnings kept stocks near records, but June 3 closing       │
+│ levels were not yet final at midday.                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
 The viewer has two layouts (toggle top-right) and works for any run shape. It
 surfaces per-agent **tokens and time** (recorded by the runner) at agent, phase,
 and run level; add `--watch` to rebuild the HTML live as a run progresses:
@@ -149,6 +185,77 @@ and run level; add `--watch` to rebuild the HTML live as a run progresses:
 Both render results generically (arrays-of-objects → tables, `palette` → color
 swatches, `severity`/`effort` → badges, 1–10 scores → pills) and handle flat runs,
 huge fan-outs (collapsed to "+N more"), journal-only runs, and string/null results.
+
+---
+
+## Watch a run build live
+
+One command fans out agents to gather **today's US stock-market news** and shows
+the run building as a live ASCII map. Agents appear as **running** (spinner +
+elapsed) the moment they start and flip to `✓` with their tokens/time when they
+finish; the footer tracks wall-clock and a live done/running count. It exits on its
+own when the run finishes (needs `codex login`; the agents use **live web access**,
+and a web-research run takes a few minutes):
+
+```bash
+npm run demo:live
+# or a different example / inputs:
+node runner/bin/demo-live.js --script examples/triage.workflow.js --args '{"items":[{"id":"1","text":"crash on empty config"}]}'
+```
+
+Mid-run, completed agents show their finding (a 1–2 sentence snippet of what they
+returned) while the rest are still in flight:
+
+```text
+╭─ ◆ market-news ──────────────────────────────────────────────────────────────╮
+│ ✓✓⠋⠋⠋  2/5 done · 3 running · 1 phase · 218k tok · 4m53s · gpt-5.5           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  │
+  ▼ ① Gather ──────────────────────────  2 done · 3 running · 218k tok · 4m53s
+      AGENT      MODEL    EFFORT  TOKENS    WALL
+  ├─✓ indices    gpt-5.5  high       52k   1m26s
+  │   S&P 500 rose 0.4% to a record 6,012; Nasdaq +0.6% and Dow +0.3% at the
+  │   June 2 close.
+  ├─✓ sectors    gpt-5.5  high      166k   3m27s
+  │   Technology and communication services led; energy and utilities lagged.
+  ├─⠋ movers     gpt-5.5  high        --   6m00s
+  ├─⠋ macro      gpt-5.5  high        --   6m00s
+  ╰─⠋ catalysts  gpt-5.5  high        --   6m00s
+  │
+  ▼
+╭─ ✦ result ───────────────────────────────────────────────────────────────────╮
+│ in progress…                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+As each agent finishes, its spinner flips to `✓` and its snippet appears; a barrier
+holds, then a lone `synthesize` agent writes the cited brief that becomes the
+result node.
+
+Or just add **`--tui`** / **`--gui`** to any `run-workflow.js` invocation and it
+auto-opens a live monitor that tracks the run as it goes — `--tui` opens the ASCII
+map in a new terminal window, `--gui` opens the HTML viewer in your browser,
+`--monitor` opens both. Each shows **every agent, running + done**, with constant
+updates:
+
+```bash
+node runner/bin/run-workflow.js examples/market-news.workflow.js --frontier --auto-effort --gui --tui \
+  --args '{"date":"today"}'
+```
+
+To wire it up by hand against any run — run the workflow in one terminal and watch
+in another, both pointed at the **same journal**:
+
+```bash
+# terminal A — run, writing a known journal path
+node runner/bin/run-workflow.js examples/tournament-sort.workflow.js --frontier --auto-effort \
+  --sandbox read-only --journal /tmp/run.jsonl \
+  --args '{"criterion":"most likely to be a flaky test","bucketSize":3,"items":["test_login asserts on Date.now()","test_api retries 3x on 500","test_math pure arithmetic"]}'
+
+# terminal B — live map (pre-create the journal so the watcher can attach first)
+: > /tmp/run.jsonl
+node runner/bin/map-run.js --journal /tmp/run.jsonl --watch
+```
 
 ---
 
@@ -222,10 +329,14 @@ SKILL.md                  the Claude Code skill (manual-invoke /codex-workflows)
 runner/                   standalone runner (Node, zero deps)
   bin/run-workflow.js     execute a workflow script on Codex
   bin/view-run.js         generate the HTML run viewer
+  bin/map-run.js          render the run as an ASCII map in the terminal (--watch)
+  bin/demo-live.js        run an example + watch it build live (npm run demo:live)
   src/                    codexAgent (the seam) + runtime, transport, helpers
-  test/                   offline + view-run robustness + handshake
+  src/runModel.js         shared run-model assembly (HTML + ASCII viewers)
+  src/asciiMap.js         ASCII map renderer
+  test/                   offline + view-run + map-run robustness + handshake
 references/               authoring.md (DSL) · runner-readme.md (internals)
-examples/                 hello · review · tournament-sort · triage · classify-route · deep-research · demo/
+examples/                 market-news · hello · review · tournament-sort · triage · classify-route · deep-research · demo/
 docs/                     screenshots
 ```
 

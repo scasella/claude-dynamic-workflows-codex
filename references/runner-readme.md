@@ -74,6 +74,8 @@ run-workflow <script.js>
   --budget N          token ceiling backing budget.total / budget.remaining()
   --budget-meter M    what budget.spent() counts: total (input+output, default) | output
   --plan              dry run: count agents per phase/effort + estimate a budget (no model)
+  --tui               open a live ASCII map of the run in a new terminal window
+  --gui               open a live HTML viewer of the run in your browser  (--monitor = both)
   --model M           fallback model (Claude ids/aliases auto-mapped); omit for config default
   --frontier          pin ALL agents to the auto-detected latest frontier model (overrides per-call model)
   --pin-model M       pin ALL agents to model M (overrides per-call model)
@@ -119,17 +121,53 @@ edited prompts/opts miss and re-run. This is the runner's analogue of native
 cheap to recover from: bump the limit, `--resume`, and only the unfinished work runs.
 On a `--budget` trip the CLI prints a paste-ready `--resume --budget <2×>` command.
 
-### Per-agent metrics & the viewer
+### Per-agent metrics & the viewers
 
 Alongside each result, the journal records non-identity attribution: the agent's
 **phase** (`opts.phase`, else the ambient `phase()`), **effort**, resolved
 **model**, **tokens** (total and output-only), and **wall time** — captured in
 `codexAgent.js` (host clock + the `thread/tokenUsage/updated` total for that
-thread) and folded in by `runtime.js`. `view-run.js` reads these straight from the
-journal (falling back to script regex for older journals) and renders token totals
-and time per agent, per phase, and per run — the data the native `/workflows` view
-shows. `view-run.js <dir> --watch` rebuilds the HTML as the journal grows so an
-open tab tracks a live run (it auto-refreshes every 2s).
+thread) and folded in by `runtime.js`.
+
+Both viewers read the same model. `src/runModel.js` (`locateRun` + `buildRunModel`)
+turns a journal (+ optional script) into the structured run model — phases, agents
+with phase/model/effort/tokens/ms, and totals — preferring the journal's per-agent
+fields and falling back to script regex for older journals. On top of it:
+
+- **`bin/view-run.js`** — the HTML viewer. Renders token totals and time per agent,
+  per phase, and per run (the data the native `/workflows` view shows). `<dir>
+  --watch` rebuilds the HTML as the journal grows so an open tab tracks a live run
+  (auto-refreshes every 2s).
+- **`bin/map-run.js`** — an **ASCII execution-graph (DAG)** in the terminal: an
+  orchestrator node-box (with a monochrome `✓✓⠋··` progress strip) → a flow arrow
+  into each phase layer → branch edges (`├─` / `╰─`) to a **fixed-column agent
+  grid** (`AGENT MODEL EFFORT TOKENS WALL` header; running rows share the columns —
+  spinner status, `--` tokens, elapsed in `WALL` — so done/running scan as one
+  table) → a **1–2 sentence result snippet** (via `agentSnippet`) under each node →
+  **semantic barriers** (`┄ barrier · Gather → Synthesize ┄`) → a result node-box.
+  All widths derive from one `frameW`; text is display-width-safe (wide/combining
+  chars), so it stays aligned in `--no-color`. `+N more` collapses big fan-outs;
+  `<dir> --watch` redraws in place on an alternate screen (snippets auto-drop if the
+  frame would overflow the terminal height). The polish came from a Codex
+  multi-persona workflow — see `polish-ascii-map.workflow.js`.
+
+### Live observability (the event stream)
+
+Completed agents come from the journal, but a live run also wants to show what's
+**running**. So when journaling is on, the runner writes a sidecar event stream
+next to the journal — `<name>.events.jsonl` — appending `{t, type, label, phase,
+model, effort, tokens, ms}` on each agent `start` / `end` / `cached` (emitted by
+`runtime.js` via an `onEvent` sink; truncated fresh per run; best-effort, never
+blocks the run; disabled by `--no-journal`). It's purely observational — separate
+from the resume journal, so it never affects identity/hashing.
+
+`runModel.js` (`readEvents` + `liveState`) turns it into live state: agents with a
+`start` not yet matched by an `end` are **running**, plus run wall-clock
+(`runStartedAt`..`lastEventAt`) and done/running counts. `map-run.js --watch` merges
+those running agents into the map — they show under their phase the instant they
+start, with a spinner and live elapsed (`⠴ global-ranking  3.6s running…`), and an
+animated footer (`⠴ 42s · 2 done · 1 running`). The HTML viewer can consume the
+same stream; today it renders completed agents and `--watch`-rebuilds.
 
 ### Budget metering (`--budget-meter`)
 
@@ -148,7 +186,29 @@ estimated `--budget`. Because skeleton arrays are empty, a fan-out sized from a
 prior agent's output is **uncounted** (a lower bound); the CLI says so. Static
 fan-outs (over `args`, fixed lists) count exactly.
 
-### Worktree isolation
+### Live monitoring (`--tui` / `--gui`)
+
+`run-workflow` can auto-open a live monitor that watches **this run's** journal +
+event sidecar as it progresses — so you see every agent (running + done) update in
+real time without a second command. It's spawned *before* the workflow starts (the
+journal is pre-created) and runs alongside it:
+
+- **`--tui`** opens the ASCII map (`map-run.js --watch`) in a **new terminal
+  window** — it needs its own TTY for the alternate-screen redraw, so on macOS the
+  runner uses `osascript` to open Terminal (elsewhere it prints the command). The
+  window persists after the run; Ctrl-C there to close it.
+- **`--gui`** spawns `view-run.js --watch --open`, which opens the **HTML viewer**
+  in your browser and rebuilds it as the journal/events grow (the page
+  auto-refreshes every ~2s). On completion the runner stops the watcher and writes
+  a final static render so the page settles.
+- **`--monitor`** does both. All need journaling (skipped under `--no-journal`).
+
+Both viewers consume the same live model: `runModel.js`'s **`buildLiveRunModel`**
+(= `buildRunModel` + `liveState`) merges started-but-unfinished agents as
+`status:'running'`, so the HTML viewer now shows in-flight agents (amber, pulsing,
+with elapsed) exactly as the ASCII map does. The workflow itself runs unchanged —
+its result JSON still prints to stdout — so `--tui`/`--gui` compose with everything
+else (`--frontier --auto-effort`, `--resume`, …).
 
 `agent(prompt, { isolation: 'worktree', cwd: <repo> })` runs the Codex thread in a
 detached `git worktree` at HEAD, so parallel agents that edit files don't collide.

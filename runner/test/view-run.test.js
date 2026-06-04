@@ -72,6 +72,16 @@ const cases = [
     J({ key: "m2#0", label: "audit:str", result: "a plain string result" }),
     J({ key: "m3#0", label: "audit:nul", result: null }) ] },
   { name: "empty", lines: [] },
+  // Live run: 1 completed agent in the journal + 2 still running in the event
+  // sidecar — the viewer should merge the running agents (status:'running').
+  { name: "live",
+    lines: [J({ key: "g1#0", label: "gather:indices", result: { summary: "S&P 500 +0.4% to a record close." }, phase: "Gather", model: "gpt-5.5", effort: "high", tokens: 52000, ms: 86000 })],
+    events: [
+      J({ t: 1000, type: "start", label: "gather:indices", phase: "Gather", model: "gpt-5.5", effort: "high" }),
+      J({ t: 87000, type: "end", label: "gather:indices", phase: "Gather" }),
+      J({ t: 1000, type: "start", label: "gather:movers", phase: "Gather", model: "gpt-5.5", effort: "high" }),
+      J({ t: 1000, type: "start", label: "gather:macro", phase: "Gather", model: "gpt-5.5", effort: "high" }),
+    ] },
   // Per-agent metric fields the runtime now persists (phase/model/effort/tokens/ms)
   // — the viewer should read them straight from the journal, no script needed.
   { name: "enriched", lines: [
@@ -96,6 +106,7 @@ for (const c of cases) {
   const dir = join(ROOT, c.name), jdir = join(dir, ".workflow-journal");
   mkdirSync(jdir, { recursive: true });
   writeFileSync(join(jdir, c.name + ".workflow.jsonl"), c.lines.join("\n"));
+  if (c.events) writeFileSync(join(jdir, c.name + ".workflow.events.jsonl"), c.events.join("\n"));
   if (c.script) writeFileSync(join(dir, c.name + ".workflow.js"), c.script);
   const out = join(ROOT, c.name + ".html");
   let r;
