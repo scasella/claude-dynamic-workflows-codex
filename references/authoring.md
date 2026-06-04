@@ -125,9 +125,22 @@ const confirmed = results.flat().filter(Boolean).filter((f) => f.verdict?.real)
 **Perspective-diverse verify** — give each verifier a distinct lens
 (correctness, security, repro) instead of N identical refuters.
 
+**Majority refute-by-default** — for a finding that has to be *right*, spawn N
+independent skeptics (each told to refute, and to default to refuted when unsure)
+and keep it only if the majority cannot refute it — stronger than a single
+verifier. Runnable: `examples/bug-hunt.workflow.js`.
+
 **Judge panel** — generate N independent attempts from different angles, score
 with parallel judges, synthesize from the winner while grafting the best of the
 rest. Beats one-attempt-iterated when the solution space is wide.
+
+**Fresh-context review gate** — *no agent reviews its own work.* A producer
+rationalizes its own choices, so split the roles: the producer drafts an
+artifact, independent reviewers see ONLY the artifact + a rubric (not the task,
+the producer's reasoning, or each other's reviews), and a final gate — neither
+producer nor reviewer — rules go / revise / no-go and cites the reviews. Make it
+the default for design / plan / implementation / PR review. Runnable:
+`examples/review-gates.workflow.js`.
 
 **Loop-until-dry** — for unknown-size discovery, keep spawning finders until K
 consecutive rounds find nothing new; dedup against everything seen (a Set), not
@@ -143,6 +156,9 @@ while (dry < 2) {
   // …judge fresh…
 }
 ```
+Always cap the rounds too (a runaway-loop backstop, and it bounds a `--plan`
+dry run). Runnable: `examples/bug-hunt.workflow.js` (loop-until-dry into the
+majority refute-by-default verify above).
 
 **Loop-until-budget** — scale depth to `--budget`. Guard on `budget.total` (else
 `remaining()` is `Infinity` and it runs to the 1000-agent cap):

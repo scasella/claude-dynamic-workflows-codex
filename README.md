@@ -375,7 +375,7 @@ runner/                   standalone runner (Node, zero deps)
   src/asciiMap.js         ASCII map renderer
   test/                   offline + view-run + map-run robustness + handshake
 references/               authoring.md (DSL) · runner-readme.md (internals)
-examples/                 market-news · hello · review · tournament-sort · triage · classify-route · deep-research · demo/
+examples/                 market-news · hello · review · bug-hunt · review-gates · tournament-sort · triage · classify-route · deep-research · demo/
 docs/                     screenshots
 ```
 
