@@ -72,7 +72,7 @@ Behind that one line, Claude:
 1. **Preflights** Codex — confirms the app-server is reachable and notes the latest frontier model.
 2. **Compiles** your rough intent into a concrete harness — picks the scale, archetype, and pattern, builds a task contract, and states its assumptions (no external "metaprompt" needed).
 3. **Authors** a workflow script into your project (`./<name>.workflow.js`) — so you can read it, tweak it, and rerun it.
-4. **Runs** it on Codex, pinning **every agent to the latest frontier model** (`gpt-5.5`) and **auto-scaling each agent's thinking effort** to its layer — a lone judge/synthesize gate thinks hardest (`xhigh`), wide fan-outs get the `high` floor.
+4. **Runs** it on Codex, pinning **every agent to the latest frontier model** (`gpt-5.5`) and **scaling thinking effort to the harness** — a small run goes flat `--effort medium`, while a bigger one uses `--auto-effort` so a lone judge/synthesize gate thinks hardest (`xhigh`) and wide fan-outs floor at `high`.
 5. **Surfaces** the outcome right in the conversation — a summary, the script path, and the run's **execution map rendered inline** as text:
 
 ```text
@@ -108,12 +108,12 @@ You don't manage flags; you describe what you want and Claude wires it up. Commo
 | **Watch it build live** | "…and let me watch it" · "open the live GUI" | opens a browser viewer (`--gui`) and/or a new-terminal ASCII map (`--tui`) that update **in place** as agents run |
 | **See the size/cost first** | "plan it first — how many agents, roughly how much?" | a **no-token dry run** (`--plan`) that counts agents per phase and estimates a budget |
 | **Cap the spend** | "keep it under ~5M tokens" | a hard `--budget` ceiling — tripping it isn't fatal, it prints a one-line `--resume` to continue |
-| **Keep it read-only** | "read-only — don't let agents write files" | runs every agent with `--sandbox read-only` (good for audits, research, exploration) |
+| **Keep it read-only (safety)** | "read-only — don't let agents write files" | runs every agent with `--sandbox read-only` — a **safety** choice (agents read but never write); good for audits, research, exploration. Not a way to spend less. |
 | **Let it edit files** | "let it apply the migration" | `--sandbox workspace-write` (the default) so agents can write |
 | **Resume after a stop** | "resume that run" | replays already-finished agents from the journal **free**, runs only the rest |
 | **Pick a specific pattern** | "do a loop-until-dry bug hunt" · "fresh-context review with independent reviewers" | authors that exact pattern (see the [pattern library](references/authoring.md)) |
 
-Two things you *don't* tune: it's always **one frontier model for every agent** and **auto-effort** — no model-mixing, no per-agent effort bookkeeping. To spend less, lower the budget or ask for read-only; not a smaller model.
+One thing you *don't* tune: it's always **one frontier model for every agent** — no model-mixing. Thinking **effort** scales to the harness instead (a quick 2–5-agent run goes flat `--effort medium`; bigger runs use `--auto-effort`, so lone judge/synthesis gates think hardest). **To spend less**, lower the **budget**, drop the **effort**, narrow the **fan-out**, and **`--plan` first** to size it — never a smaller model. (Read-only is a **safety** choice — what agents may touch — not a cost lever.)
 
 ### Example invocations
 

@@ -10,7 +10,7 @@
 //
 //   node runner/bin/run-workflow.js examples/harness-zoo/goal-lint/goal-lint.workflow.js \
 //     --args-file examples/harness-zoo/goal-lint/sample-args.json \
-//     --frontier --effort medium --sandbox read-only --budget 1000000 --gui
+//     --frontier --auto-effort --sandbox read-only --budget 1000000 --gui
 //
 // Patterns: structured Parse → perspective-diverse parallel Critique →
 // single-gate Rewrite → fresh-context Verify. The verifier never saw the rewrite

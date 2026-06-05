@@ -49,6 +49,22 @@ Operating rules in this mode:
   skill. The whole *Compiling rough intent into a workflow* section below is that
   compiler.
 
+## Default execution checklist
+
+Every run, in order (the sections below expand each step):
+
+1. **Preflight** Codex once (`handshake.js`); note the latest frontier model.
+2. **Compile** the rough intent: classify the job → scale → archetype → pattern
+   (name the failure mode it prevents) → task contract. **State your assumptions.**
+3. **Author** the script into the repo (`./<name>.workflow.js`).
+4. **Settings:** `--frontier` · effort by scale (`--effort medium` for a
+   `quick_harness`, `--auto-effort` for `standard`/`deep`) · `--sandbox read-only`
+   unless it must write · a bounded `--budget` · strict schemas (`additionalProperties:false`).
+5. **Size it** — run `--plan` first for any expensive or complex workflow.
+6. **Run** on the Codex runner (never the native `Workflow` tool).
+7. **Surface** — inline ASCII map + `summarize-run` highlights; cite the script,
+   journal, viewer, report, and run-summary paths (see *Output behavior*).
+
 ## Mode detection
 
 Read the mode from the user's phrasing, then behave accordingly:
@@ -103,17 +119,20 @@ are unchanged; steps 2 and 4 are where rough intent gets compiled.
    `workflows/<name>.workflow.js` / `examples/harness-zoo/<name>/` for a reusable
    harness. Scripts are plain JavaScript using only the injected globals (no imports).
 
-4. **Choose run settings** (see *Run defaults*): `--frontier`, `--auto-effort`, a
-   read-only sandbox unless the run must write, and a bounded `--budget`. For an
-   expensive or complex workflow, **`--plan` first** — a no-token dry run that counts
-   agents per phase/effort and estimates a `--budget` — before the live run.
+4. **Choose run settings** (see *Run defaults*): `--frontier`, the effort flag for
+   the chosen scale (`--auto-effort` for a standard/deep harness, `--effort medium`
+   for a quick one), a read-only sandbox unless the run must write, and a bounded
+   `--budget`. For an expensive or complex workflow, **`--plan` first** — a no-token
+   dry run that counts agents per phase/effort and estimates a `--budget`.
 
-5. **Run** it — **always pass `--frontier` and `--auto-effort`**: `--frontier`
-   pins every agent to the latest frontier model (see *Model*); `--auto-effort`
-   scales each agent's thinking effort to its layer's parallel width, so critical
-   single-agent gates think hardest (see *Effort*):
+5. **Run** it — **always pass `--frontier`**, plus the effort flag for the chosen
+   scale: `--auto-effort` for a standard/deep harness (it scales each agent's effort
+   to its layer's parallel width, so lone synthesis/judge gates think hardest), or
+   `--effort medium` for a quick harness (see *Effort*). `--frontier` pins every
+   agent to the latest frontier model (see *Model*):
    ```bash
    node ~/.claude/skills/codex-workflows/runner/bin/run-workflow.js <script.js> --frontier --auto-effort [other flags]
+   #   quick_harness:  … <script.js> --frontier --effort medium [other flags]
    ```
    Progress streams on **stderr**; the workflow's return value prints as JSON on
    **stdout**. Capture stdout for the result (`… 1>/tmp/result.json`) when it's
@@ -169,6 +188,11 @@ productization · goal hardening · run summarization · harness design.**
 
 **Rule: choose the smallest harness that can reliably solve the task** (see the
 *Anti-overbuild rule*).
+
+**Effort by scale:** a `quick_harness` runs at a flat **`--effort medium`** (or
+`--pin-effort medium`) — a small analytical run doesn't need layer-scaled effort.
+`standard_harness` and `deep_harness` run at **`--auto-effort`** (lone gates get
+`xhigh`, fan-outs floor at `high`). See *Run defaults* and *Effort*.
 
 ### 3 · Pick the archetype
 
@@ -313,8 +337,8 @@ this section is the policy, not the reference):
 | Always | the Codex runner, **not** the native `Workflow` tool | routes work to Codex/GPT, not Claude subagents |
 | Always | write the script into the repo | reproducible and rereadable |
 | Model | `--frontier` | one frontier model for every agent (see *Model*) |
-| Effort (default) | `--auto-effort` | scales effort to layer width; lone synthesis/judge gates get `xhigh` |
-| Effort (flat fallback) | `--effort medium` | uniform, cheaper tier for small analytical runs |
+| Effort — `quick_harness` | `--effort medium` (or `--pin-effort medium`) | a small analytical run doesn't need layer-scaled effort; a flat, cheaper tier suffices |
+| Effort — `standard` / `deep` | `--auto-effort` | scales effort to layer width; lone synthesis/judge gates get `xhigh`, fan-outs floor at `high` |
 | Default sandbox | **`--sandbox read-only`** (pass it explicitly) | the runner's own default is `workspace-write` — don't rely on it |
 | Writing a report / running experiments / requested edits | `--sandbox workspace-write` | only when the run must write |
 | Never (unless explicitly requested **and** justified) | `--sandbox danger-full-access` | unsandboxed |
@@ -366,9 +390,10 @@ consolidation, a judge/synthesis, a final report — where one weak output sinks
 whole run; it earns maximum reasoning. A 12-wide persona fan-out is the opposite:
 each agent is one voice among many, and redundancy covers individual misses.
 
-**Always pass `--auto-effort`.** The runner reads each layer's parallel width
-(the number of thunks in a `parallel()`, or items in a `pipeline()` stage) and
-sets effort automatically:
+**For a standard or deep harness, pass `--auto-effort`** (a small `quick_harness`
+runs at a flat `--effort medium` instead — see *Harness scale selector*). The runner
+reads each layer's parallel width (the number of thunks in a `parallel()`, or items
+in a `pipeline()` stage) and sets effort automatically:
 
 | Parallel agents in the layer | Effort  | Typical role |
 |------------------------------|---------|--------------|
@@ -389,9 +414,9 @@ exception (e.g. forcing `xhigh` on one unusually hard agent *inside* a wide
 layer).
 
 Bound cost without touching the model: keep `--auto-effort` but add a `--budget`
-backstop, or drop everything a tier with `--pin-effort medium`. The old flat
-`--effort medium` still works as a fallback when you don't pass `--auto-effort`,
-but the layer-aware policy is strictly better for multi-phase runs.
+backstop, or drop everything a tier with `--pin-effort medium`. For a small
+`quick_harness`, flat **`--effort medium`** is the right default (cheaper, uniform);
+the layer-aware policy matters most for multi-phase standard/deep runs.
 
 ## Authoring (quick reference)
 
@@ -577,7 +602,10 @@ node ~/.claude/skills/codex-workflows/runner/bin/map-run.js <project-dir> [--wat
 
 It auto-finds the journal and the `*.workflow.js` script in that dir (or pass
 `--journal PATH` / `--script PATH` / `--out PATH`), writes `<name>.run.html`, and
-`--open` launches it. Offline/self-contained (data embedded). Per-agent **tokens,
+`--open` launches it. When a run directory holds **several** journals, all three
+tools (`view-run`, `map-run`, `summarize-run`) default to the **most recently
+modified** one; pass **`--list`** to see them all and **`--journal PATH`** to pick a
+specific one. Offline/self-contained (data embedded). Per-agent **tokens,
 time, model, and effort** (recorded by the runner) show per agent, per phase, and
 per run; add **`--watch`** for a live monitor that updates **in place — no reload,
 no flicker** (theme / view / selected node / open drawer / scroll / zoom all

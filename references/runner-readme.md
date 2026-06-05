@@ -198,10 +198,18 @@ node bin/summarize-run.js <run-dir> --include-result   # also preview the return
 
 It reports total / completed / null / cached / interrupted agents, agents·tokens·
 agent-time **by phase**, the **top 10 costliest** (tokens) and **slowest** (time)
-agents, a **model & effort** breakdown, **budget usage** (from the meta sidecar),
-and **cache hit rate** on a resumed run. It also raises warnings: missing metrics,
-many null results, interrupted agents, unphased / unlabeled agents, a single phase
-with a huge fan-out, and agents left on the (often-`xhigh`) Codex default effort.
+agents, a **model & effort** breakdown, and **cache hit rate** on a resumed run.
+Token totals separate the journal's **all-in** sum (across resumes) from the
+**latest run's executed** tokens (agents that finished this run, matched by stable
+id); **budget usage** (from the meta sidecar) bills the latest run when the event
+sidecar is present, else the all-in total — and labels which. It also raises
+warnings: missing metrics, many null results, interrupted agents, unphased /
+unlabeled agents, a single phase with a huge fan-out, and agents left on the
+(often-`xhigh`) Codex default effort.
+
+When a run directory holds several journals, `summarize-run` — like `view-run` and
+`map-run` — defaults to the **most recently modified**; **`--list`** shows them all
+and **`--journal PATH`** selects a specific one.
 
 What each source contributes (all optional except the journal):
 

@@ -22,7 +22,7 @@ Run GoalLint on it:
 ```bash
 node runner/bin/run-workflow.js examples/harness-zoo/goal-lint/goal-lint.workflow.js \
   --args-file examples/harness-zoo/goal-lint/sample-args.json \
-  --frontier --effort medium --sandbox read-only --budget 1000000 --gui
+  --frontier --auto-effort --sandbox read-only --budget 1000000 --gui
 ```
 
 …or pass this goal directly as a bare string:
@@ -30,7 +30,7 @@ node runner/bin/run-workflow.js examples/harness-zoo/goal-lint/goal-lint.workflo
 ```bash
 node runner/bin/run-workflow.js examples/harness-zoo/goal-lint/goal-lint.workflow.js \
   --args '"Improve the error handling in the API and make it more robust, then make sure everything still works."' \
-  --frontier --effort medium --sandbox read-only --budget 1000000
+  --frontier --auto-effort --sandbox read-only --budget 1000000
 ```
 
 The run returns a hardened goal (allowed/forbidden files, commands, success **and**

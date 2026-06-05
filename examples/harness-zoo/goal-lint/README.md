@@ -77,15 +77,20 @@ and [`sample-goal.md`](sample-goal.md).
 ```bash
 node runner/bin/run-workflow.js examples/harness-zoo/goal-lint/goal-lint.workflow.js \
   --args-file examples/harness-zoo/goal-lint/sample-args.json \
-  --frontier --effort medium --sandbox read-only --budget 1000000 --gui
+  --frontier --auto-effort --sandbox read-only --budget 1000000 --gui
 ```
+
+GoalLint is an 11-agent **standard** harness, so it runs with **`--auto-effort`**:
+its 7 parallel critics get `high`, while the lone gates — Parse, Rewrite, the
+fresh-context Verify, and Report — get `xhigh`, since a weak output at any of those
+single-agent gates would sink the whole lint.
 
 A **bare string** goal works too:
 
 ```bash
 node runner/bin/run-workflow.js examples/harness-zoo/goal-lint/goal-lint.workflow.js \
   --args '"make the upload endpoint faster"' \
-  --frontier --effort medium --sandbox read-only --budget 1000000
+  --frontier --auto-effort --sandbox read-only --budget 1000000
 ```
 
 **Size it first** with a no-token dry run (counts agents per phase, estimates a budget):
