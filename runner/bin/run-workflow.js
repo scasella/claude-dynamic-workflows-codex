@@ -17,7 +17,8 @@ import { runWorkflowFile } from "../src/runWorkflow.js";
 import { getClient, shutdownClient } from "../src/codexAgent.js";
 import { pickFrontier } from "../src/modelMap.js";
 import { Journal } from "../src/journal.js";
-import { eventsPathFor, resultPathFor, progressPathFor } from "../src/runModel.js";
+import { eventsPathFor, resultPathFor, progressPathFor, runMetaPathFor } from "../src/runModel.js";
+import { summarizeRun, renderSummaryText, renderEndOfRun } from "../src/runSummary.js";
 
 const BIN_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -42,6 +43,8 @@ function parseArgs(argv) {
     resume: false,
     noJournal: false,
     fresh: false,
+    summary: false,
+    noSummary: false,
     help: false,
   };
   const rest = argv.slice(2);
@@ -67,6 +70,8 @@ function parseArgs(argv) {
     else if (a === "--resume") out.resume = true;
     else if (a === "--no-journal") out.noJournal = true;
     else if (a === "--fresh") out.fresh = true;
+    else if (a === "--summary") out.summary = true;
+    else if (a === "--no-summary") out.noSummary = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.script) out.script = a;
   }
@@ -82,6 +87,7 @@ if (opts.help || !opts.script) {
       "  [--effort none|minimal|low|medium|high|xhigh] [--auto-effort | --pin-effort E]\n" +
       "  [--sandbox read-only|workspace-write|danger-full-access] [--retries N]\n" +
       "  [--plan] [--tui] [--gui] [--resume] [--journal PATH] [--fresh] [--no-journal]\n" +
+      "  [--summary | --no-summary]\n" +
       "\n" +
       "  --tui            open a live ASCII map of the run in a new terminal window\n" +
       "  --gui            open a live HTML viewer of the run in your browser\n" +
@@ -97,7 +103,9 @@ if (opts.help || !opts.script) {
       "  --budget-meter   what budget.spent() counts: total (input+output, default) or\n" +
       "                   output (generated+reasoning, the native pool)\n" +
       "  --plan           dry run: count agents per phase/effort and estimate a --budget,\n" +
-      "                   without calling any model or spending tokens",
+      "                   without calling any model or spending tokens\n" +
+      "  --summary        print the full cost/performance/reliability report at the end\n" +
+      "                   (a short one is printed automatically; --no-summary silences it)",
   );
   process.exit(opts.help ? 0 : 1);
 }
@@ -281,6 +289,19 @@ if (!opts.noJournal) {
   const eventsPath = eventsPathFor(journalPath);
   try { writeFileSync(eventsPath, ""); } catch {}
 
+  // Run-meta sidecar: the budget ceiling + effort/model policy the journal can't
+  // carry, so a post-hoc `summarize-run` can report budget usage. Best-effort.
+  try {
+    writeFileSync(runMetaPathFor(journalPath), JSON.stringify({
+      budget: opts.budget ?? null,
+      budgetMeter: opts.budgetMeter,
+      model: pinnedModel ?? defaultModel ?? null,
+      autoEffort: opts.autoEffort,
+      pinEffort: pinnedEffort,
+      sandbox: opts.sandbox ?? null,
+    }));
+  } catch {}
+
   // Live partial-output sidecar: { label: latest partial text } for agents that are
   // still streaming, so a live viewer can preview progress instead of a blank pane.
   // Rewritten on a throttle (atomic), bounded in size, best-effort — never blocks.
@@ -377,6 +398,23 @@ try {
     // final sidecar (final:true). The open live page picks up the sidecar, patches
     // to the finished state in place, and stops polling — no reload, no flicker.
     try { spawnSync("node", [join(BIN_DIR, "view-run.js"), "--journal", resolve(journalPath), "--settle"], { stdio: "ignore" }); } catch {}
+  }
+  // End-of-run recap (stderr): a short cost/performance/reliability summary, or the
+  // full report with --summary. Quiet for tiny runs; silenced by --no-summary.
+  // Best-effort and fully guarded — a summary hiccup never changes the run outcome.
+  if (journalPath && !opts.noSummary && existsSync(journalPath)) {
+    try {
+      const s = summarizeRun({ journalPath, scriptPath: resolve(opts.script) });
+      if (s.counts.journaledAgents > 0) {
+        if (opts.summary) {
+          console.error("\n" + renderSummaryText(s));
+        } else {
+          const reportCmd = `node ${join(BIN_DIR, "summarize-run.js")} --journal ${journalPath}`;
+          const block = renderEndOfRun(s, { reportCmd });
+          if (block) console.error("\n─── summary ───\n" + block);
+        }
+      }
+    } catch {}
   }
   if (opts.tui) console.error("ℹ  the TUI monitor window keeps running — Ctrl-C there to close it.");
 }

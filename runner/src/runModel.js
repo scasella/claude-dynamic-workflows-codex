@@ -105,6 +105,20 @@ export function readResult(journalPath) {
   try { return JSON.parse(readFileSync(p, "utf8")); } catch { return undefined; }
 }
 
+// Optional run-level metadata, written once by the runner next to the journal:
+// {startedAt, budget, budgetMeter, model, autoEffort, pinEffort, sandbox}. Purely
+// informational — lets a post-hoc summary report budget usage and effort policy
+// that the journal alone can't carry. Absent for journal-only / older runs.
+export function runMetaPathFor(journalPath) {
+  return journalPath.replace(/\.jsonl$/i, "") + ".meta.json";
+}
+
+export function readRunMeta(journalPath) {
+  const p = runMetaPathFor(journalPath);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; }
+}
+
 // Live partial output for in-flight agents: { label: latest streamed text }. The
 // runner rewrites this while agents stream; the viewer shows it for running agents.
 export function progressPathFor(journalPath) {

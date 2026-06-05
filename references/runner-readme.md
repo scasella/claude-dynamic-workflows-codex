@@ -88,6 +88,8 @@ run-workflow <script.js>
   --journal PATH      journal location (default .workflow-journal/<script>.jsonl)
   --fresh             discard the journal before running
   --no-journal        disable journaling entirely
+  --summary           print the full cost/performance/reliability report at the end
+  --no-summary        silence the short end-of-run recap (printed by default)
 ```
 
 ### Layer-width effort (`--auto-effort`)
@@ -177,6 +179,45 @@ budget-sizing rule of thumb assume. Pass `--budget-meter output` to count only
 output+reasoning, matching the native runtime's output-token pool, for scripts
 whose `budget`-driven loops were written against that semantics.
 
+### Run summary report (`bin/summarize-run.js`)
+
+A run leaves a journal (and, when journaling is on, an event sidecar); `summarize-run`
+distills them into a **cost / performance / reliability** report. `src/runSummary.js`
+(`summarizeRun` + `renderSummaryText` / `renderSummaryMarkdown`) builds it on top of
+`buildRunModel`, so it inherits the same old-journal tolerance (phase/model/effort
+recovered from the script when the journal predates the metric fields) and **never
+writes the journal**.
+
+```bash
+node bin/summarize-run.js --journal .workflow-journal/<name>.jsonl   # or: <run-dir>
+node bin/summarize-run.js <run-dir> --json        # structured (the summary object)
+node bin/summarize-run.js <run-dir> --markdown    # paste-ready report
+node bin/summarize-run.js <run-dir> --out r.txt   # write to a file
+node bin/summarize-run.js <run-dir> --include-result   # also preview the return value
+```
+
+It reports total / completed / null / cached / interrupted agents, agents·tokens·
+agent-time **by phase**, the **top 10 costliest** (tokens) and **slowest** (time)
+agents, a **model & effort** breakdown, **budget usage** (from the meta sidecar),
+and **cache hit rate** on a resumed run. It also raises warnings: missing metrics,
+many null results, interrupted agents, unphased / unlabeled agents, a single phase
+with a huge fan-out, and agents left on the (often-`xhigh`) Codex default effort.
+
+What each source contributes (all optional except the journal):
+
+- **journal** — completed agents (deduped by key), phase/model/effort/tokens/ms.
+- **`<name>.events.jsonl`** — the most recent run's lifecycle, giving true
+  **wall-clock per phase** (vs. the journal's sum-of-durations), **cached** replays,
+  and **interrupted** agents (a `start` with no matching `end`).
+- **`<name>.result.json`** — the workflow's return value, for `--include-result`.
+- **`<name>.meta.json`** — run-level facts the journal can't carry (budget + meter,
+  pinned model, effort policy, sandbox), written once by `run-workflow` at startup
+  (best-effort; runtime-only, git-ignored). Absent → the budget line is simply omitted.
+
+`run-workflow` prints a short recap automatically when a run finishes (one line for
+tiny runs, a small phase table otherwise); `--summary` prints the full report inline,
+`--no-summary` silences it.
+
 ### Dry-run planning (`--plan`)
 
 `--plan` executes the orchestration with `agent()` stubbed — it returns a JSON
@@ -261,7 +302,9 @@ process/fetch/import; non-deterministic builtins blocked), **`isolation:'worktre
 the **resume journal** (`--resume`), the **named-workflow registry**
 (`workflow("name")` → `.claude/workflows/` then `~/.claude/workflows/`),
 **`--plan` dry-run estimation**, **`--budget-meter total|output`**, **`--watch`
-live viewer**, one-level `workflow({scriptPath} | "name")` nesting, and the CLI.
+live viewer**, the **`summarize-run` cost/performance/reliability report**
+(text/json/markdown, with an automatic end-of-run recap), one-level
+`workflow({scriptPath} | "name")` nesting, and the CLI.
 Validated end-to-end on real multi-phase runs (parallel schema reviewers feeding a
 consolidator), including budget-stop-then-resume. See `examples/demo/` for a
 bundled sample run.
