@@ -80,7 +80,7 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
   const totalAgentMs = agents.reduce((s, a) => s + (a.ms || 0), 0);
 
   // ── event-derived signals (most recent run only; null without the sidecar) ──
-  let cachedAgents = null, interruptedAgents = null, runWallMs = null, executedThisRun = null;
+  let cachedAgents = null, interruptedAgents = null, runWallMs = null, executedThisRun = null, executedTokens = null;
   const phaseWall = new Map(); // phase -> { minStart, maxEnd }
   if (events) {
     const ls = liveState(events);
@@ -88,6 +88,14 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
     executedThisRun = events.filter((e) => e.type === "start").length;
     interruptedAgents = ls ? ls.running.length : 0; // started, never ended → the run is over, so: interrupted
     runWallMs = ls && ls.runStartedAt != null && ls.lastEventAt != null ? ls.lastEventAt - ls.runStartedAt : null;
+    // Tokens actually spent in the MOST RECENT run: agents that finished this run
+    // (a non-cached 'end'), matched to journal entries by stable id (label fallback
+    // for pre-id events). This separates a resume's all-in journal total from what
+    // the latest run alone cost — cached replays spend 0.
+    const endedIds = new Set(events.filter((e) => e.type === "end").map((e) => e.id ?? e.label));
+    executedTokens = endedIds.size
+      ? agents.filter((a) => endedIds.has(a.id) || endedIds.has(a.label)).reduce((s, a) => s + (a.tokens || 0), 0)
+      : 0;
     for (const e of events) {
       if (typeof e.t !== "number" || !e.phase) continue;
       const w = phaseWall.get(e.phase) || { minStart: Infinity, maxEnd: 0 };
@@ -140,13 +148,20 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
     .map((a) => ({ label: a.label, phase: a.phase, model: a.model || null, ms: a.ms }));
 
   // ── budget usage (only when the meta sidecar carries a ceiling) ──
+  // The ceiling applies to a SINGLE run's spend (the meter resets each invocation).
+  // With the event sidecar we bill the latest run's executed tokens (basis
+  // "latest-run"); without it we fall back to the journal's all-in total and label
+  // it "all-in-journal", since on a resumed run that over-counts this run's spend.
   let budget = null;
   if (meta && typeof meta.budget === "number" && meta.budget > 0) {
-    const spent = totalTokens; // Σ agent tokens — the conservative all-in spend
+    const haveExecuted = events && executedTokens != null;
+    const spent = haveExecuted ? executedTokens : totalTokens;
     budget = {
       total: meta.budget,
       meter: meta.budgetMeter || "total",
       spent,
+      basis: haveExecuted ? "latest-run" : "all-in-journal",
+      allInTokens: totalTokens, // Σ over the whole journal (across resumes)
       remaining: Math.max(0, meta.budget - spent),
       fraction: spent / meta.budget,
     };
@@ -242,7 +257,8 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
       hasMetrics: !!(run.totals && run.totals.hasMetrics),
       agentsWithTokens: withTokens,
       agentsWithMs: withMs,
-      totalTokens,
+      totalTokens, // Σ over the whole journal — all-in across resumes
+      executedTokens, // tokens spent in the most recent run only (null without events)
       totalAgentMs,
       runWallMs,
     },
@@ -297,12 +313,15 @@ export function renderSummaryText(s, { includeResult = false } = {}) {
   const c = s.counts, m = s.metrics;
   L.push("  " + padE("Agents", 12) + agentBreakdown(c));
   L.push("  " + padE("Phases", 12) + String(c.phases));
-  if (m.totalTokens) L.push("  " + padE("Tokens", 12) + `${fmtTokens(m.totalTokens)}   (${m.totalTokens.toLocaleString()})`);
+  const resumed = m.executedTokens != null && m.executedTokens !== m.totalTokens;
+  if (m.totalTokens) L.push("  " + padE("Tokens", 12) + `${fmtTokens(m.totalTokens)}   (${m.totalTokens.toLocaleString()})${resumed ? "  all-in across resumes" : ""}`);
+  if (resumed) L.push("  " + padE("Executed", 12) + `${fmtTokens(m.executedTokens)}   (most recent run; the rest replayed from cache)`);
   if (m.totalAgentMs) L.push("  " + padE("Agent-time", 12) + `${fmtMs(m.totalAgentMs)}   (Σ per-agent durations, not wall-clock)`);
   if (m.runWallMs) L.push("  " + padE("Wall-clock", 12) + `${fmtMs(m.runWallMs)}   (most recent run, from the event stream)`);
   if (s.budget) {
     const b = s.budget;
-    L.push("  " + padE("Budget", 12) + `${fmtTokens(b.spent)} / ${fmtTokens(b.total)} ${b.meter} (${pct(b.fraction)} used · ${fmtTokens(b.remaining)} left)`);
+    const basis = b.basis === "latest-run" ? "this run" : "journaled all-in total";
+    L.push("  " + padE("Budget", 12) + `${fmtTokens(b.spent)} / ${fmtTokens(b.total)} ${b.meter} (${pct(b.fraction)} used · ${fmtTokens(b.remaining)} left) · ${basis}`);
   }
   if (s.cache) L.push("  " + padE("Cache", 12) + `${pct(s.cache.fraction)} hit (${s.cache.cached} replayed / ${s.cache.touched} touched) — resumed run`);
 
@@ -401,10 +420,12 @@ export function renderSummaryMarkdown(s, { includeResult = false } = {}) {
   L.push("| :--- | :--- |");
   L.push(`| Agents | ${agentBreakdown(c)} |`);
   L.push(`| Phases | ${c.phases} |`);
-  if (m.totalTokens) L.push(`| Tokens | ${fmtTokens(m.totalTokens)} (${m.totalTokens.toLocaleString()}) |`);
+  const resumed = m.executedTokens != null && m.executedTokens !== m.totalTokens;
+  if (m.totalTokens) L.push(`| Tokens | ${fmtTokens(m.totalTokens)} (${m.totalTokens.toLocaleString()})${resumed ? ", all-in across resumes" : ""} |`);
+  if (resumed) L.push(`| Executed (latest run) | ${fmtTokens(m.executedTokens)} |`);
   if (m.totalAgentMs) L.push(`| Agent-time | ${fmtMs(m.totalAgentMs)} (Σ per-agent durations) |`);
   if (m.runWallMs) L.push(`| Wall-clock | ${fmtMs(m.runWallMs)} (most recent run) |`);
-  if (s.budget) L.push(`| Budget | ${fmtTokens(s.budget.spent)} / ${fmtTokens(s.budget.total)} ${s.budget.meter} (${pct(s.budget.fraction)} used) |`);
+  if (s.budget) L.push(`| Budget | ${fmtTokens(s.budget.spent)} / ${fmtTokens(s.budget.total)} ${s.budget.meter} (${pct(s.budget.fraction)} used · ${s.budget.basis === "latest-run" ? "this run" : "all-in"}) |`);
   if (s.cache) L.push(`| Cache | ${pct(s.cache.fraction)} hit (${s.cache.cached}/${s.cache.touched}) |`);
 
   if (s.byPhase.length) {

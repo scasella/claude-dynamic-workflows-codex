@@ -67,6 +67,7 @@ const ok = (m) => { n++; console.log("  ✓ " + m); };
   assert.equal(s.counts.nullResults, 0);
   assert.equal(s.counts.interruptedAgents, 0);
   assert.equal(s.metrics.totalTokens, 1_600_000);
+  assert.equal(s.metrics.executedTokens, 1_600_000, "fresh run: every agent finished this run → executed == all-in");
   assert.equal(s.metrics.runWallMs, 18_000, "run wall-clock = 19000 - 1000");
   const scan = s.byPhase.find((p) => p.phase === "Scan");
   assert.equal(scan.agents, 2);
@@ -134,6 +135,8 @@ const ok = (m) => { n++; console.log("  ✓ " + m); };
   assert.equal(s.cache.cached, 2);
   assert.equal(s.cache.touched, 4, "2 cached + 2 started");
   assert.equal(s.cache.fraction, 0.5);
+  assert.equal(s.metrics.totalTokens, 400_000, "all-in across the journal");
+  assert.equal(s.metrics.executedTokens, 200_000, "only verify:a executed this run; cached finds replayed free");
   assert.ok(codes(s, "warn").includes("interrupted-agents"), "interrupted agents warn");
   assert.match(renderSummaryText(s), /Cache\s+50% hit/);
   ok("resumed run: cache hit rate + interrupted detection");
@@ -153,6 +156,8 @@ const ok = (m) => { n++; console.log("  ✓ " + m); };
   assert.equal(s.budget.spent, 900_000);
   assert.equal(s.budget.remaining, 100_000);
   assert.equal(Math.round(s.budget.fraction * 100), 90);
+  assert.equal(s.budget.basis, "all-in-journal", "no event sidecar → budget falls back to the all-in journal total");
+  assert.match(renderSummaryText(s), /journaled all-in total/);
   assert.ok(codes(s, "warn").includes("budget-pressure"), "≥80% used -> warn");
   assert.deepEqual(s.policy, { model: "gpt-5.5", autoEffort: true, pinEffort: null, sandbox: "read-only" });
   const txt = renderSummaryText(s);
@@ -268,6 +273,36 @@ const ok = (m) => { n++; console.log("  ✓ " + m); };
   execFileSync("node", [BIN, "--journal", jpath, "--json", "--out", outPath], { stdio: ["ignore", "ignore", "ignore"] });
   assert.equal(JSON.parse(readFileSync(outPath, "utf8")).counts.journaledAgents, 2, "--out wrote the JSON report");
   ok("end-to-end CLI: text / json / markdown / --out / run-dir");
+}
+
+// 13) Resumed run WITH a budget + id-bearing events: budget bills the LATEST run's
+//     executed tokens (matched by id), separate from the journal's all-in total.
+{
+  const journal = [
+    { key: "x#0", label: "scan:a", phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 450_000, ms: 5000, result: {} },
+    { key: "y#0", label: "scan:b", phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 450_000, ms: 5000, result: {} },
+    { key: "z#0", label: "report", phase: "Report", model: "gpt-5.5", effort: "xhigh", tokens: 300_000, ms: 4000, result: {} },
+  ];
+  // resume: the two scans replay from cache (0 tokens this run); only report executes.
+  const events = [
+    { t: 10, type: "cached", id: "x#0", label: "scan:a", phase: "Scan" },
+    { t: 20, type: "cached", id: "y#0", label: "scan:b", phase: "Scan" },
+    { t: 100, type: "start", id: "z#0", label: "report", phase: "Report" },
+    { t: 500, type: "end", id: "z#0", label: "report", phase: "Report", tokens: 300_000, ms: 4000 },
+  ];
+  const meta = { budget: 1_000_000, budgetMeter: "total", model: "gpt-5.5", autoEffort: true, sandbox: "read-only" };
+  const { jpath } = writeRun("resumed-budget", { journal, events, meta });
+  const s = summarizeRun({ journalPath: jpath });
+  assert.equal(s.metrics.totalTokens, 1_200_000, "all-in across the journal");
+  assert.equal(s.metrics.executedTokens, 300_000, "only report executed this run (matched by id)");
+  assert.equal(s.budget.basis, "latest-run", "with events present, budget bills the latest run");
+  assert.equal(s.budget.spent, 300_000, "spent = executed-this-run, not the all-in 1.2M");
+  assert.equal(s.budget.allInTokens, 1_200_000);
+  assert.equal(s.budget.remaining, 700_000);
+  const txt = renderSummaryText(s);
+  assert.match(txt, /Executed/, "report distinguishes executed-this-run");
+  assert.match(txt, /this run/, "budget line labels the latest-run basis");
+  ok("resumed + budget + events: latest-run executed tokens vs all-in journal total");
 }
 
 rmSync(ROOT, { recursive: true, force: true });
