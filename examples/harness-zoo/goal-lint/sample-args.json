@@ -1,0 +1,7 @@
+{
+  "goal": "Improve the error handling in the API and make it more robust, then make sure everything still works.",
+  "repoContext": "Node/Express service under src/. Unit tests run with `npm test`; there is no CI gate on coverage. Logs go to stdout.",
+  "allowedFiles": ["src/**", "test/**"],
+  "forbiddenFiles": [".env", "src/db/migrations/**", "package-lock.json"],
+  "expectedArtifacts": ["a passing `npm test`", "a short CHANGES.md note describing what changed"]
+}
