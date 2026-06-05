@@ -346,9 +346,12 @@ svg.edges path.arrowhead{fill:var(--arrow)}
   .drawer.dock .drawer-backdrop{display:block}
 }
 .mnode.selected{border-color:var(--green);box-shadow:0 0 0 1px var(--green),0 4px 18px rgba(0,0,0,.32)}
-.drawer-head{display:flex;align-items:flex-start;justify-content:space-between;padding:16px 18px 10px;gap:12px;
-  position:sticky;top:0;z-index:2;background:var(--panel);border-bottom:1px solid var(--border)}
-.drawer-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto;padding:8px 18px 30px}
+/* Fixed top region (title + meta chips) that never scrolls; the body below is the
+   sole scroller. (A sticky head here would detach and paint over the body, since
+   the panel itself doesn't scroll — the body does.) */
+.drawer-top{flex:none;background:var(--panel);border-bottom:1px solid var(--border)}
+.drawer-head{display:flex;align-items:flex-start;justify-content:space-between;padding:16px 18px 10px;gap:12px}
+.drawer-body{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:auto;padding:12px 18px 30px}
 .xbtn{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;width:34px;height:34px;
   cursor:pointer;font-size:13px;flex:none}
 .xbtn:hover{color:var(--text);border-color:var(--green)}
@@ -766,6 +769,23 @@ function renderRun(){
     g.append(c);
   });
   m.append(g);
+  // costliest agents — a quick cost lens over the run (when per-agent metrics exist)
+  if(hasMetrics()){
+    const costly=RUN.agents.filter(a=>a.tokens!=null).sort((a,b)=>b.tokens-a.tokens).slice(0,3);
+    if(costly.length){
+      m.append(h('h2',{class:'sec'},'Costliest agents'));
+      const cg=h('div',{class:'card'});
+      costly.forEach(a=>{
+        const row=h('div',{class:'metarow',style:{cursor:'pointer'},onclick:()=>select({type:'agent',id:a.label})});
+        row.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
+        if(a.ms!=null) row.append(h('span',{class:'pill'},fmtMs(a.ms)));
+        row.append(h('span',{class:'label-mono',style:{fontWeight:600}},a.label));
+        if(a.model) row.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
+        cg.append(row);
+      });
+      m.append(cg);
+    }
+  }
   // run meta
   m.append(h('h2',{class:'sec'},'Run'));
   const meta=h('div',{class:'card'});
@@ -778,6 +798,10 @@ function renderRun(){
     if(RUN.totals.ms) addkv('agent-time',fmtMs(RUN.totals.ms)+'  (sum of per-agent durations, not wall-clock)');
   }
   if(Object.keys(RUN.models).length) addkv('models',h('div',{class:'chips'},Object.entries(RUN.models).map(([mm,ct])=>h('span',{class:'chip',style:{color:modelColor[mm],borderColor:modelColor[mm]+'55'}},mm+' ×'+ct))));
+  // effort breakdown (mirrors the summarize-run report; surfaces default-effort cost)
+  const efforts={}; RUN.agents.forEach(a=>{const e=a.effort||'default';efforts[e]=(efforts[e]||0)+1;});
+  const effKeys=Object.keys(efforts);
+  if(effKeys.length&&!(effKeys.length===1&&effKeys[0]==='default'&&!hasMetrics())) addkv('effort',h('div',{class:'chips'},effKeys.map(e=>h('span',{class:'pill'},e+' ×'+efforts[e]))));
   meta.append(kv);
   m.append(meta);
   return m;
@@ -1113,17 +1137,19 @@ function buildDrawer(label){
   const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
   back.append(h('div',{class:'drawer-backdrop',onclick:closeDrawer}));
   const panel=h('div',{class:'drawer-panel'+(__suppressMotion?'':' intro'),role:'dialog','aria-modal':'true','aria-label':'Agent '+a.label});
-  panel.append(h('div',{class:'drawer-head'},
+  const top=h('div',{class:'drawer-top'});
+  top.append(h('div',{class:'drawer-head'},
     h('div',{}, h('div',{class:'crumbs'},a.phase), h('div',{class:'title-lg',style:{fontSize:'17px'}},a.label)),
     h('button',{class:'xbtn',id:'drawer-close','aria-label':'Close',onclick:closeDrawer},'✕')));
-  const chips=h('div',{class:'metarow',style:{padding:'0 18px 4px'}});
+  const chips=h('div',{class:'metarow',style:{padding:'0 18px 12px'}});
   if(a.model) chips.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
   if(a.effort) chips.append(h('span',{class:'pill'},'effort · '+a.effort));
   if(a.tokens!=null) chips.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
   if(a.ms!=null) chips.append(h('span',{class:'pill'},fmtMs(a.ms)));
   chips.append(statusChip(a));
   chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerAgent=null;select({type:'agent',id:label});}},'open in tree ↗'));
-  panel.append(chips);
+  top.append(chips);
+  panel.append(top);
   const body=h('div',{class:'drawer-body'});
   if(isRunning(a) && a.result==null){
     body.append(pendingResult(a));
@@ -1141,9 +1167,11 @@ function buildResultDrawer(){
   const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
   back.append(h('div',{class:'drawer-backdrop',onclick:closeDrawer}));
   const panel=h('div',{class:'drawer-panel'+(__suppressMotion?'':' intro'),role:'dialog','aria-modal':'true','aria-label':'Workflow result'});
-  panel.append(h('div',{class:'drawer-head'},
+  const top=h('div',{class:'drawer-top'});
+  top.append(h('div',{class:'drawer-head'},
     h('div',{}, h('div',{class:'crumbs'},RUN.name), h('div',{class:'title-lg',style:{fontSize:'17px'}},'workflow result')),
     h('button',{class:'xbtn',id:'drawer-close','aria-label':'Close',onclick:closeDrawer},'✕')));
+  panel.append(top);
   const body=h('div',{class:'drawer-body'});
   const r=RUN.result;
   if(r&&typeof r==='object') body.append(renderValue(r));
