@@ -180,6 +180,123 @@ Prefer the terminal? The same run renders as the **ASCII map** shown above — t
 
 ---
 
+## Putting it to work
+
+`/codex-workflows` is most useful as an **operating layer around your agents** — reach for it *before* expensive work, *after* messy results, and whenever you want a **repeatable process** instead of a one-off answer. Today **GoalLint** and **`summarize-run`** are concrete and shipped; the other archetypes (triage, eureka, repo-deep-read, root-cause, rule-mining, …) are **shapes the skill authors on demand** — promote the ones that earn their keep into `examples/harness-zoo/` (see the last pattern below).
+
+### Harden the goal before an expensive run
+
+Make this the default reflex. Before handing a serious `/goal` to Codex — especially anything touching research claims, benchmarks, repo edits, evals, or "is this result real?":
+
+```text
+/codex-workflows quick Harden this Codex goal before I run it:
+[paste your /goal]
+```
+
+GoalLint turns a vague, risky instruction into a precise, testable, **falsifiable**, artifact-producing one — so you stop getting runs that end in "looks good" with no artifacts, no controls, and no stopping criteria.
+
+### Inspect every nontrivial run
+
+Treat the run summary as an **agent-ops dashboard**, not an afterthought (full flags in [The run summary report](#the-run-summary-report)):
+
+```bash
+node runner/bin/summarize-run.js <run-dir> --list          # list a dir's journals, newest first
+node runner/bin/summarize-run.js <run-dir> --markdown --out reports/<name>-summary.md
+```
+
+It tells you what the run cost, which phases were expensive, which agents were slow or returned null, whether a resume replayed cached work, and it flags structural smells (a huge single-phase fan-out, agents left on default effort). On resumed runs it separates the journal's **all-in** tokens from the **latest run's executed** tokens. If a workflow is expensive or messy, fix the **harness**, not just the prompt.
+
+### A research loop: triage → ideate → harden → execute → inspect
+
+For experiment-driven work, run a cadence instead of one-off prompts:
+
+```text
+# after a result lands — decide what it means and what's next
+/codex-workflows Triage the latest result in this repo. Decide whether it's real, overfit, useful, or worth continuing, then write the next strict Codex /goal.
+
+# when you're stuck or a result is ambiguous — generate testable directions
+/codex-workflows deep Generate surprising but practically testable next research ideas from the latest reports and logs. Emphasize hidden mechanisms, falsification, and hard-to-fake success criteria.
+```
+
+Then GoalLint the chosen `/goal`, run it on Codex, and `summarize-run` the result — and repeat.
+
+### Reach for quick harnesses daily
+
+This isn't only for giant fan-outs. A `quick_harness` is **2–5 agents** for goal hardening, assumption checks, small critiques, quick ranking, or a single claim check — cheap enough for everyday use:
+
+```text
+/codex-workflows quick Critique this plan before I send it to Codex — ambiguity, falsification, and overbuild critics only.
+/codex-workflows quick Rank these 6 ideas by novelty, practical usefulness, and fastest proof-of-value — pairwise, not 1–10.
+/codex-workflows quick Check whether this README claim is actually supported by the current repo.
+```
+
+### Ask what harness a task deserves
+
+When you're unsure whether a task wants goal-hardening, claim verification, loop-until-dry, tournament ranking, a root-cause lab, or bounded execution, let the skill **design the harness** without running it:
+
+```text
+/codex-workflows prompt-only Design the best Codex-backed harness for: [rough task]. Choose the scale, archetype, pattern, failure mode, task contract, phases, personas, run settings, and output artifacts. Don't run it.
+```
+
+### Diagnose failures with a root-cause lab
+
+When CI, a run, a benchmark, or a Codex task fails, don't ask one agent to "fix the bug" — that invites a confident wrong diagnosis:
+
+```text
+/codex-workflows Diagnose the latest failed run. Use a root-cause lab: separate agents for logs, recent diffs, code-path tracing, environment/resource issues, hypothesis generation, hypothesis refutation, and a minimal repro. Return ranked causes and the cheapest discriminating next test.
+```
+
+### Turn recurring failures into durable rules
+
+Periodically mine your own traces so the system gets better as you use it:
+
+```text
+/codex-workflows Mine recent reports, journals, failed agent outputs, and my corrections for recurring failure modes. Propose durable rules for CLAUDE.md / AGENTS.md / harness templates — keep only rules that would have prevented a real failure without over-constraining future work.
+```
+
+### Structured synthesis with source discipline
+
+The tool isn't only for code. For a memo, brief, or grant concept, the `policy_or_grant_builder` archetype runs an evidence scan, an opposition critique, claim verification, and a concision pass:
+
+```text
+/codex-workflows Draft a one-page memo from the files in this folder — evidence scan, opposition critique, claim verification, then a ruthless concision edit.
+```
+
+When a task needs current facts the repo doesn't contain, tell it to **report source gaps rather than fabricate** — the skill's epistemic standards already separate confirmed evidence from inference and treat missing evidence as uncertainty, not success.
+
+### The trust loop: harden before, verify after
+
+GoalLint is the **before** tool. Its natural **after** counterpart is **ClaimCheck** — extract the claims in a README, post, report, or agent output, verify each against repo artifacts, and emit a proof ledger. The skill can author it as a reusable template:
+
+```text
+/codex-workflows Create a reusable harness-zoo workflow `claim-check.workflow.js`: extract claims from a doc or agent output, verify each against repo artifacts, mark them supported / unsupported / contradicted / plausible-unverified, suggest safer rewrites, and emit a proof ledger. Include a README, sample args, and a plan-mode smoke test.
+```
+
+> **Harden the instruction before agents run; verify the claims after they write.** Together that's a trust loop.
+
+### Promote what repeats into a template
+
+When a rough-intent workflow earns its keep over a few runs, productize it so next time it's one command:
+
+```text
+Run a rough-intent workflow 3–5 times → notice repeated value →
+promote it to examples/harness-zoo/<name>/ with a README, sample args, and a --plan smoke test.
+```
+
+GoalLint already proves the model (workflow + README + sample args + strict schemas + a `--plan` test). Strong next candidates: `claim-check`, `research-result-triage`, `root-cause-lab`, `agent-rule-miner`.
+
+### A weekly cadence
+
+```text
+Before each expensive run   →  /codex-workflows quick Harden this /goal before I run it.
+After each result           →  /codex-workflows Triage the latest result and write the next /goal.
+After each run              →  summarize-run the journal; fix the harness if it's costly or messy.
+Weekly                      →  /codex-workflows Generate net-new practical ideas from this repo and recent run summaries.
+Monthly                     →  /codex-workflows Mine recurring agent failures into durable rules.
+```
+
+---
+
 ## Without Claude Code (standalone CLI)
 
 The runner and viewer work on their own — no Claude Code required.
