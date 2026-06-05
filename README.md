@@ -61,7 +61,7 @@ That's it — the skill is now available in Claude Code as `/codex-workflows`.
 
 ## Using it in Claude Code
 
-The skill is **manual-invoke only** — Claude never auto-triggers it. You type `/codex-workflows` and describe the task in plain language:
+The skill is **manual-invoke only** — Claude never auto-triggers it. You type `/codex-workflows` and describe the task in **one or two rough sentences** — there's no need to pre-engineer a prompt; the skill compiles your rough intent into the right workflow itself:
 
 ```
 /codex-workflows  Audit every route under src/ for missing auth checks
@@ -70,9 +70,10 @@ The skill is **manual-invoke only** — Claude never auto-triggers it. You type 
 Behind that one line, Claude:
 
 1. **Preflights** Codex — confirms the app-server is reachable and notes the latest frontier model.
-2. **Authors** a workflow script into your project (`./<name>.workflow.js`) — so you can read it, tweak it, and rerun it.
-3. **Runs** it on Codex, pinning **every agent to the latest frontier model** (`gpt-5.5`) and **auto-scaling each agent's thinking effort** to its layer — a lone judge/synthesize gate thinks hardest (`xhigh`), wide fan-outs get the `high` floor.
-4. **Surfaces** the outcome right in the conversation — a summary, the script path, and the run's **execution map rendered inline** as text:
+2. **Compiles** your rough intent into a concrete harness — picks the scale, archetype, and pattern, builds a task contract, and states its assumptions (no external "metaprompt" needed).
+3. **Authors** a workflow script into your project (`./<name>.workflow.js`) — so you can read it, tweak it, and rerun it.
+4. **Runs** it on Codex, pinning **every agent to the latest frontier model** (`gpt-5.5`) and **auto-scaling each agent's thinking effort** to its layer — a lone judge/synthesize gate thinks hardest (`xhigh`), wide fan-outs get the `high` floor.
+5. **Surfaces** the outcome right in the conversation — a summary, the script path, and the run's **execution map rendered inline** as text:
 
 ```text
 ╭─ ◆ market-news ──────────────────────────────────────────────────────────────╮
@@ -134,12 +135,27 @@ Two things you *don't* tune: it's always **one frontier model for every agent** 
 
 # Migrate — find every call site and rewrite it (needs write access)
 /codex-workflows  Find every call of legacyFetch() and migrate it to the new client, then apply the edits
+
+# Harden a goal — lint a vague /goal into a precise, testable one before you spend a fleet (goal_lint)
+/codex-workflows  Harden this Codex goal before I run it
+
+# Claim-check — verify a draft's claims against the actual repo, refute the unsupported ones (claim_check)
+/codex-workflows  Verify this blog draft against the repo
+
+# Invent — net-new-to-industry product ideas, not thin wrappers; judged and recombined (industry_invention_studio)
+/codex-workflows  Generate practically useful, net-new product ideas from this repo
+
+# Triage a result — decide real / overfit / continue, then write the next experiment's /goal (research_result_triage)
+/codex-workflows  Triage the latest research result and write the next /goal
 ```
+
+Rough intent is the default — a sentence or two is enough, and the skill compiles the rest (scale, archetype, pattern, task contract, safe run settings). Add `prompt-only` if you just want the generated invocation without running it.
 
 ### Following a run
 
 - Claude renders the **execution map inline** as the run progresses and again when it lands — so you can follow it without leaving the conversation.
 - For the full browser GUI at any time, just ask Claude to **open the viewer** (it runs `view-run` on the run's journal).
+- For a **cost & reliability recap** — tokens by phase, the costliest/slowest agents, and any red flags — ask Claude to **summarize the run** (it runs `summarize-run` on the journal); a short version also prints automatically when a run finishes.
 - Every run is journaled to `<project>/.workflow-journal/<name>.jsonl`; ask Claude to **open the last run in the viewer** to revisit a past run.
 - The script Claude wrote stays in your project — rerun or edit it directly, or ask Claude to adjust it.
 
@@ -180,9 +196,47 @@ node runner/bin/run-workflow.js examples/market-news.workflow.js --frontier --au
 # Turn any past run into the viewer (HTML, or a terminal ASCII map):
 node runner/bin/view-run.js <project-dir> --open       # add --watch for live
 node runner/bin/map-run.js  <project-dir> --watch
+
+# Distill a finished run into a cost / performance / reliability report:
+node runner/bin/summarize-run.js <project-dir>         # also: --json / --markdown / --out PATH
 ```
 
-Key flags: `--frontier` (pin the latest frontier model), `--auto-effort` (scale effort to layer width), `--plan` (dry-run agent count + budget estimate, no tokens), `--budget N` (token ceiling) with `--budget-meter total|output`, `--sandbox read-only|workspace-write`, `--tui` / `--gui` / `--monitor` (live monitors), `--resume`. See `node runner/bin/run-workflow.js --help`.
+Key flags: `--frontier` (pin the latest frontier model), `--auto-effort` (scale effort to layer width), `--plan` (dry-run agent count + budget estimate, no tokens), `--budget N` (token ceiling) with `--budget-meter total|output`, `--sandbox read-only|workspace-write`, `--tui` / `--gui` / `--monitor` (live monitors), `--resume`, `--summary` (full end-of-run report). See `node runner/bin/run-workflow.js --help`.
+
+### The run summary report
+
+`run-workflow` prints a one-line recap when a run finishes (`--summary` for the full report; `--no-summary` to silence it). To distill any past run yourself — what it cost, where the time went, and whether anything looks off — point `summarize-run` at the journal:
+
+```text
+$ node runner/bin/summarize-run.js examples/demo
+
+  Run summary · nimbus-landing-redesign
+  Audit a fictional SaaS landing page and propose ranked, commercially-ap…
+
+  Agents      8 completed
+  Phases      4
+  Tokens      2.1M   (2,150,000)
+  Agent-time  19m58s   (Σ per-agent durations, not wall-clock)
+
+── By phase ──────────────────────────────────────────────────────────────
+  PHASE            AGENTS    TOKENS  AGENT-TIME
+  Audit                 2      350k       3m05s
+  Concept               3      765k       7m14s
+  Judge                 2      623k       5m46s
+  Synthesize            1      412k       3m53s
+
+── Costliest agents (by tokens) ──────────────────────────────────────────
+    1.    412k  synthesize                   Synthesize     gpt-5.5
+    2.    319k  judge:growth                 Judge          gpt-5.4
+    3.    304k  judge:designer               Judge          gpt-5.4
+    …                                       (up to the top 10; slowest-by-time too)
+
+── Effort ────────────────────────────────────────────────────────────────
+  medium                4 agents   973k tok
+  high                  4 agents   1.2M tok
+```
+
+It reads the journal plus any sidecars: the **event stream** adds true wall-clock per phase, **cache hit rate** on a resumed run, and detection of **interrupted** agents (started, never finished); the **meta** sidecar adds **budget usage**. It also flags risks — missing metrics, many null results, an un-staged huge fan-out, agents left on the expensive default effort. It's read-only (never touches the journal), handles old journals that predate the metric fields, and emits `--json` (structured) or `--markdown` (paste-ready) as well as text.
 
 A minimal workflow script (the DSL — `agent` / `parallel` / `pipeline` / `phase` / `budget` / `args` — is documented in [`references/authoring.md`](references/authoring.md), with runnable templates in [`examples/`](examples)):
 
@@ -253,14 +307,18 @@ runner/                   standalone runner (Node, zero deps)
   bin/run-workflow.js     execute a workflow script on Codex
   bin/view-run.js         generate the HTML run viewer (--watch for live)
   bin/map-run.js          render the run as an ASCII map in the terminal (--watch)
+  bin/summarize-run.js    cost / performance / reliability report (text/json/markdown)
   bin/demo-live.js        run an example + watch it build live (npm run demo:live)
   src/                    codexAgent (the seam) + runtime, transport, helpers
   src/runModel.js         shared run-model assembly (HTML + ASCII viewers)
   src/asciiMap.js         ASCII map renderer
-  test/                   offline + view-run + view-run.live + map-run + handshake
+  src/runSummary.js       run-summary computation + text/markdown renderers
+  test/                   offline + view-run + view-run.live + map-run + summarize-run +
+                          goal-lint.plan + handshake
 references/               authoring.md (DSL + patterns) · runner-readme.md (internals)
 examples/                 hello · review · bug-hunt · review-gates · deep-research ·
                           market-news · tournament-sort · triage · classify-route · demo/
+  harness-zoo/goal-lint/  GoalLint — harden a vague /goal into a precise, testable one
 docs/                     screenshots
 ```
 

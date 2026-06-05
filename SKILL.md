@@ -4,7 +4,8 @@ description: >-
   Run a dynamic-workflow script on a local Codex App Server — orchestrate many
   Codex / GPT agents (the agent / parallel / pipeline / phase / budget DSL)
   instead of Claude subagents, for codebase audits, large migrations, and
-  multi-agent review or research. Manual-invoke only via /codex-workflows.
+  multi-agent review or research. Give it one or two rough sentences and it
+  compiles the right harness for you. Manual-invoke only via /codex-workflows.
 disable-model-invocation: true
 ---
 
@@ -26,7 +27,57 @@ Claude subagents, say so and point them at the native Workflow tool.
 `~/.claude/skills/codex-workflows/runner` (also at `runner/` relative to this
 skill). It is dependency-free Node ≥ 18.
 
+## Default rough-intent mode
+
+**One or two rough sentences is enough.** You do not need to hand this skill a
+fully-engineered spec — describe what you want (e.g. `/codex-workflows Harden this
+goal before I run it`) and the skill compiles it into an operational harness itself:
+it classifies the job, picks the smallest workable scale, an archetype, and a
+harness pattern, builds a task contract, composes phases, casts personas, applies
+the quality/epistemic standards, authors the script, picks safe run settings, and
+runs it — **stating its assumptions** as it goes.
+
+Operating rules in this mode:
+
+- The rough intent is the contract. Make reasonable assumptions for anything left
+  unspecified and **state them**; do not interrogate the user with follow-ups.
+- Choose the **smallest useful harness**, not the largest possible one (see the
+  *Anti-overbuild rule*).
+- **Do not emit a giant prompt for the user to paste back.** Compile and proceed to
+  authoring/running. (The one exception is `prompt-only` mode — see *Mode detection*.)
+- This **replaces any external "metaprompt"**: the expansion now happens inside the
+  skill. The whole *Compiling rough intent into a workflow* section below is that
+  compiler.
+
+## Mode detection
+
+Read the mode from the user's phrasing, then behave accordingly:
+
+| Mode | Trigger | Behavior |
+|------|---------|----------|
+| **default** (rough-intent) | 1–2 rough sentences | Compile internally → author → run. State assumptions. |
+| **`prompt-only`** | "prompt-only", "just the invocation", "don't run it" | Emit a complete `/codex-workflows` invocation/spec (the A–L structure below) and **STOP** — do not author or run. |
+| **`write-only`** | "write it but don't run", "author only" | Author the workflow script, print its path, stop before running. |
+| **`run-existing`** | a script path or saved-workflow name is given | Skip compilation; run that script/name through the runner. |
+| **`quick`** | "quick", "small", "cheap" | Bias to a `quick_harness` (2–5 agents). |
+| **`deep`** | "deep", "thorough", "exhaustive" | Allow a larger / `deep_harness`; justify the size. |
+| **`no-write`** | "don't write files", "just tell me" | Return final JSON/Markdown only; no report/source files; `--sandbox read-only`. |
+
+Two precedence rules: if the user gives a **script path or saved name**, run it
+(don't recompile). If the user gives a **detailed spec**, honor it as written but
+still apply the safety + run defaults below. Otherwise it's rough intent → compile.
+
+In **`prompt-only`**, the invocation you emit follows the same A–L structure the
+skill builds internally: **A** name · **B** purpose · **C** task contract · **D**
+inputs / context reconstruction · **E** phases · **F** personas · **G** anti-wrapper
+standards · **H** outputs · **I** run settings · **J** safety / epistemics · **K**
+final-response format · **L** productization. Then stop — do not run.
+
 ## The loop
+
+In default rough-intent mode, do steps 1–2 **silently** and state your assumptions
+before authoring. The mechanics below — handshake, the run command, the inline map —
+are unchanged; steps 2 and 4 are where rough intent gets compiled.
 
 1. **Preflight** — once per session, or whenever a run fails to connect, confirm
    Codex is reachable and authed:
@@ -41,11 +92,23 @@ skill). It is dependency-free Node ≥ 18.
    strongest). Today that is `gpt-5.5`. Every agent in the run uses it (see
    *Model*).
 
-2. **Author** a workflow script (see *Authoring*). Write it into the user's
-   project so they can read and rerun it — e.g. `./<name>.workflow.js`. Scripts
-   are plain JavaScript using only the injected globals (no imports).
+2. **Compile** the rough intent into a workflow (see *Compiling rough intent into a
+   workflow*): classify the job → pick the scale → pick the archetype → pick the
+   pattern and name the failure mode it prevents → build the task contract → compose
+   the phases → cast the personas → apply the standards. **State the resulting
+   assumptions** to the user before authoring.
 
-3. **Run** it — **always pass `--frontier` and `--auto-effort`**: `--frontier`
+3. **Author** a workflow script from that compile (see *Authoring*). Write it into
+   the user's project so they can read and rerun it — `./<name>.workflow.js`, or
+   `workflows/<name>.workflow.js` / `examples/harness-zoo/<name>/` for a reusable
+   harness. Scripts are plain JavaScript using only the injected globals (no imports).
+
+4. **Choose run settings** (see *Run defaults*): `--frontier`, `--auto-effort`, a
+   read-only sandbox unless the run must write, and a bounded `--budget`. For an
+   expensive or complex workflow, **`--plan` first** — a no-token dry run that counts
+   agents per phase/effort and estimates a `--budget` — before the live run.
+
+5. **Run** it — **always pass `--frontier` and `--auto-effort`**: `--frontier`
    pins every agent to the latest frontier model (see *Model*); `--auto-effort`
    scales each agent's thinking effort to its layer's parallel width, so critical
    single-agent gates think hardest (see *Effort*):
@@ -54,13 +117,13 @@ skill). It is dependency-free Node ≥ 18.
    ```
    Progress streams on **stderr**; the workflow's return value prints as JSON on
    **stdout**. Capture stdout for the result (`… 1>/tmp/result.json`) when it's
-   large. If the user wants to **watch the run live**, add `--tui` (live ASCII map
-   in a new terminal window) and/or `--gui` (live HTML viewer in the browser) — see
-   *Running → Live monitoring*.
+   large. To **watch the run live**, add `--tui` (live ASCII map in a new terminal
+   window) and/or `--gui` (live HTML viewer in the browser) — see *Running → Live
+   monitoring*.
 
-4. **Surface** the result to the user — summarize it, mention the script path, and
-   **render the run's ASCII map inline in this conversation** so they see the
-   execution graph natively (no window to open):
+6. **Surface** the result to the user (see *Output behavior*) — summarize it,
+   mention the script path, and **render the run's ASCII map inline in this
+   conversation** so they see the execution graph natively (no window to open):
    ```bash
    node ~/.claude/skills/codex-workflows/runner/bin/map-run.js --journal <journal> --no-color
    ```
@@ -74,9 +137,206 @@ skill). It is dependency-free Node ≥ 18.
    (running agents show as `⠋ … running…`); for a smooth live *window* instead, add
    `--tui`/`--gui` (see *Running → Live monitoring*).
 
+   The run also prints a one-line cost/reliability recap when it finishes. For a
+   fuller breakdown — tokens by phase, the costliest/slowest agents, and any red
+   flags (many nulls, an un-staged huge fan-out, default-effort cost) — run
+   `summarize-run` on the journal and fold the highlights into your reply (see
+   *Summarize a run*).
+
 **Do NOT call the native `Workflow` tool while using this skill.** Authoring the
 script and running it through the CLI above is exactly what routes the work to
 Codex; invoking the native tool would spawn Claude subagents instead.
+
+## Compiling rough intent into a workflow
+
+This is the skill's internal recipe — the work an external metaprompt used to do.
+Run these eight steps in order during loop step 2. Keep it lightweight: the output
+is a small task contract and a phase plan, not a document.
+
+### 1 · Classify the job
+
+What kind of work is it? This points you at the archetype. One of: **analysis ·
+ideation · verification · experiment design · bounded execution · drafting ·
+productization · goal hardening · run summarization · harness design.**
+
+### 2 · Pick the harness scale
+
+| Scale | Agents | Use for |
+|-------|--------|---------|
+| `quick_harness` | 2–5 | goal hardening, assumption checks, small critiques, quick ranking, small claim verification |
+| `standard_harness` | 6–20 | repo analysis, research triage, product-spec review, policy drafting, claim checking, idea generation |
+| `deep_harness` | 20+ / loops | broad discovery, tournaments, large artifact coverage, bounded empirical execution — **only when explicitly requested or clearly needed** |
+
+**Rule: choose the smallest harness that can reliably solve the task** (see the
+*Anti-overbuild rule*).
+
+### 3 · Pick the archetype
+
+| Archetype | When to use |
+|-----------|-------------|
+| `goal_lint` ✓ | harden a vague Codex/Claude `/goal` before an expensive agent run |
+| `claim_check` / `proofpack` | verify claims in a post / README / report / memo / result / agent output against repo artifacts or sources |
+| `research_result_triage` | decide whether an experiment / benchmark / result is real, overfit, useful, or worth continuing |
+| `next_experiment_designer` | design concrete next experiments, falsification gates, and Codex `/goal`s |
+| `eureka_forge` | surprising, high-upside ideas: diverse personas, forced recombination, hidden mechanisms, falsification |
+| `industry_invention_studio` | net-new-to-industry products: real pain, workflow novelty, prototype speed, defensibility, anti-wrapper, distribution wedge |
+| `repo_deep_read` | deep analysis of a repo: what it does, how it works, what's novel, what's brittle, what's buildable |
+| `autoresearch_epoch` | **actually run** bounded empirical experiments/evals (not just design them) — explicit execution only |
+| `product_spec_review` | turn an idea into an MVP spec, architecture, risks, prototype plan, first build `/goal` |
+| `policy_or_grant_builder` | an advocacy, policy, grant, research, or memo work product |
+| `manuscript_or_citation_audit` | manuscript revision, citation checking, claim-support review, journal-fit editing |
+| `investment_deep_dive` | source-grounded financial analysis, scenario valuation, thesis critique, portfolio fit |
+| `root_cause_lab` | diagnose a failure / bug / flaky test / broken workflow / failed experiment / confusing logs |
+| `agent_rule_miner` | mine recurring agent failures, review comments, or corrections into durable `CLAUDE.md` / `AGENTS.md` / workflow rules |
+| `run_summary` ✓ | summarize a workflow journal: cost, phase timing, tokens, cached / failed agents, reliability warnings |
+| `harness_forge` | design the best workflow/harness for a rough task rather than solving it directly |
+
+✓ = a concrete template ships today: `goal_lint` → `examples/harness-zoo/goal-lint/`,
+`run_summary` → `summarize-run.js` (see *Summarize a run*). The rest are **shapes to
+author** from the patterns below, not prebuilt files. Note that `harness_forge` and
+the `goal_contract_compiler` pattern are the skill's **own** meta-operations — the
+default rough-intent path *is* essentially those two.
+
+### 4 · Pick the pattern + name the failure mode
+
+Choose one or more patterns; **state in your final reply which pattern you used and
+the failure mode it prevents.**
+
+| Pattern | Failure mode it prevents | Typical shape |
+|---------|--------------------------|---------------|
+| `fan_out_and_synthesize` | premature convergence / single-view bias | parallel independent answers → one synthesizer |
+| `adversarial_verification` | unsupported claims, self-deception | each finding gets independent refuters; default refuted if weak |
+| `generate_filter_improve` | thin-wrapper ideation | generate many → filter → improve the survivors |
+| `tournament_or_pairwise_judgment` | weak ranking (unreliable 1–10) | pairwise / bracket; preserve high-upside losers |
+| `loop_until_dry` | agentic laziness, missing coverage | keep finding until N dry rounds; dedup vs all-seen; max-round guard |
+| `classify_and_act` | mis-routing mixed inputs | classify each input → route to the right agent |
+| `quarantined_triage` | untrusted-input risk | untrusted readers (read-only) kept separate from privileged/write agents |
+| `root_cause_hypothesis_lab` | confident wrong diagnosis | evidence streams generate competing hypotheses, then refute them |
+| `fresh_context_review_gates` | self-preferential judging | producers never judge their own work; reviewers get artifacts + rubric only |
+| `bounded_empirical_epoch` | metric gaming, runaway cost | run evals with keep/discard rules + a hard budget/round cap |
+| `goal_contract_compiler` | vague goals, missing artifacts/falsification | compile intent → objective, non-goals, allowed actions, success/failure, artifacts, stop |
+
+Full failure-mode vocabulary to draw from: **agentic laziness · vague goals ·
+self-preferential judging · unsupported claims · context contamination · weak
+ranking · premature convergence · thin-wrapper ideation · untrusted-input risk ·
+overbuilding · missing artifacts · missing falsification · metric gaming · source
+fabrication · file-edit collisions · runaway cost.**
+
+### 5 · Build the task contract
+
+A small contract that guides the script. Define: **objective · non-goals ·
+assumptions · allowed files/actions · forbidden files/actions · success criteria ·
+failure criteria · required artifacts · stop condition · human-review triggers (if
+any) · sandbox requirement** — and classify the workflow as **read-only**,
+**report-writing**, or **execution-capable**. (This mirrors GoalLint's
+`hardened_goal` schema — see `examples/harness-zoo/goal-lint/`.)
+
+**Inputs & context reconstruction.** Tell agents which local files/dirs to inspect
+to reconstruct project state — likely: `README.md`, `CLAUDE.md`, `AGENTS.md`,
+`.claude/`, `workflows/`, `examples/`, `reports/`, `results/`, `runs/`, `logs/`,
+`docs/`, `experiments/`, `data/`, `.workflow-journal/`, and recent artifacts.
+Require the workflow to **infer state and state its uncertainty**. If freshness or
+external/current facts matter and there is no source/web access, require a
+**source-gap report rather than fabrication**.
+
+### 6 · Compose phases
+
+Pick only the phases the chosen scale needs (a `quick_harness` may be just two):
+
+| Phase | What it does |
+|-------|--------------|
+| Context reconstruction | reconstruct objective, assets, recent attempts, constraints, success criteria, uncertainty |
+| Inventory | locate relevant files, reports, logs, journals, code paths |
+| Diverse fanout | parallel agents with genuinely different cognitive roles (not superficial personas) |
+| Discovery loop | loop-until-dry; dedup vs **all** seen items; hard max-round / budget guard |
+| Cross-pollination | force recombination across pains / mechanisms / user types / primitives / wedges / failures / analogies |
+| Adversarial verification | independent verifiers; **default to refuted/unsupported if evidence is weak** |
+| Harsh critique | skeptics attack novelty, feasibility, self-deception, overbuild, thin-wrapper, metric gaming, source weakness |
+| Tournament / pairwise | rank where 1–10 is unreliable; **preserve weird/high-upside losers separately** |
+| Scoring | structured dimensions; prefer pairwise over 1–10 for subjective taste |
+| Fresh-context review gate | producers don't judge themselves; reviewers get artifacts + rubric, not self-justification |
+| Portfolio synthesis | select best outputs **by category**, not one winner |
+| Goal writer | write strict Codex `/goal`s for the top 1–3 next actions |
+| Report writer | `reports/<name>.md` when workspace-write is allowed, else Markdown in the final JSON |
+| Run summary | for an existing journal: agents / cached / failed, tokens by phase, slowest / costliest, model·effort, warnings, a `--resume` hint |
+
+### 7 · Cast personas
+
+Use **functional** personas (each performs a specific operation) — never generic
+"optimist / pessimist."
+
+- **Ideation:** Falsifier · Signal Miner · Mechanism Theorist · Benchmark Surgeon ·
+  Weird Analogist · Toolsmith · Workflow Anthropologist · Developer-Tool Founder ·
+  Enterprise Buyer · OSS Maintainer · Eval Maximalist · Agent-Ops Engineer ·
+  Historical Skeptic · Product Translator · Alien Reviewer · Bitter Reviewer ·
+  Regulated-Workflow Designer · Skeptical Customer · Timing Critic · Wrapper Critic.
+- **Verification:** Claim Extractor · Evidence Finder · Refuter · Source-Freshness
+  Checker · Counterexample Finder · Methodology Reviewer · Artifact Auditor ·
+  Reproducibility Reviewer.
+- **Debugging / root cause:** Log Reader · Code-Path Tracer · Environment/Resource
+  Investigator · Recent-Diff Reviewer · Hypothesis Generator · Hypothesis Refuter ·
+  Minimal-Repro Designer · Fix-Scope Controller.
+
+### 8 · Apply standards
+
+**Anti-wrapper** (ideation / product archetypes): reject generic "AI assistant for
+X" and "LLM + UI" unless there is a new workflow primitive / provenance / eval loop /
+artifact graph / coordination / memory / trust mechanism / distribution wedge.
+Reject "run more seeds / scale up / improve prompts / add RAG / make a dashboard"
+unless tied to a non-obvious mechanism **and** a falsification test. Favor ideas
+where the hard part is **evidence, workflow, eval, provenance, memory, coordination,
+or trust** — not the model call — that **change a workflow** (not just automate a
+task) and carry **hard-to-fake usefulness signals**.
+
+**Epistemic discipline** (always): state assumptions; don't overclaim; separate
+confirmed evidence from plausible inference; never fabricate current facts or source
+support; preserve uncertainty; include adversarial review where claims could be
+wrong; give falsification criteria for claims / experiments / hypotheses; no producer
+self-judging; don't modify source unless explicitly requested; keep untrusted-input
+readers separate from privileged/write agents; **treat missing metrics, artifacts,
+or source evidence as failure or uncertainty — not success.**
+
+### Anti-overbuild rule
+
+Not every rough intent needs a fleet. Simple task → `quick_harness`. One-off
+analysis → don't write files you weren't asked for. Use a `deep_harness` only when
+breadth / loops / tournaments are clearly justified. Overbuilding is itself a
+failure mode: don't turn "check my README for typos" into a 12-agent panel.
+
+## Run defaults
+
+Policy for every run (flag *syntax* and precedence live in *Running* and *Effort* —
+this section is the policy, not the reference):
+
+| Situation | Setting | Why |
+|-----------|---------|-----|
+| Always | the Codex runner, **not** the native `Workflow` tool | routes work to Codex/GPT, not Claude subagents |
+| Always | write the script into the repo | reproducible and rereadable |
+| Model | `--frontier` | one frontier model for every agent (see *Model*) |
+| Effort (default) | `--auto-effort` | scales effort to layer width; lone synthesis/judge gates get `xhigh` |
+| Effort (flat fallback) | `--effort medium` | uniform, cheaper tier for small analytical runs |
+| Default sandbox | **`--sandbox read-only`** (pass it explicitly) | the runner's own default is `workspace-write` — don't rely on it |
+| Writing a report / running experiments / requested edits | `--sandbox workspace-write` | only when the run must write |
+| Never (unless explicitly requested **and** justified) | `--sandbox danger-full-access` | unsandboxed |
+| Cost | a bounded `--budget`, sized via `--plan` | hard ceiling; `--plan` estimates it |
+| Expensive / complex run | **`--plan` first** | no-token dry run before the live run |
+| Structured output | JSON schemas with `additionalProperties: false` | strict and parseable |
+| After the run | viewer via `view-run.js --open`; summary via `summarize-run.js` or `--summary` | inspect cost / shape |
+
+Three facts to encode correctly, since they're easy to get wrong:
+
+- **No workflow linter exists** — the only pre-flight is **`--plan`**. Use it.
+- **No `--concurrency` flag exists** — concurrency is fixed at `min(16, cores−2)`.
+  Don't recommend one; if a run is resource / eval-bound, lower the fan-out width
+  in the script instead.
+- **`--summary` prints inline; `summarize-run.js --out PATH` writes a file** — use
+  the latter when you need a run-summary *path*. The HTML viewer is a *file* from
+  `view-run.js --open`; `--gui` is a *live window*, not a saved artifact.
+
+**Productization** (for reusable harnesses): parameterize with `args`; avoid
+hardcoded one-off paths; add a short README/usage note for a `harness-zoo` workflow;
+name it for future install into `.claude/workflows/`; keep the script plain
+JavaScript using only the injected globals (no imports / fs — agents do all I/O).
 
 ## Model: one frontier model for every agent
 
@@ -272,6 +532,26 @@ run-workflow <script.js>
   `--resume` to finish (or assemble the final artifact from the journal results).
 - **Limits** — up to `min(16, cores−2)` agents run concurrently; 1,000 per run.
 
+## Output behavior
+
+When you surface the result (loop step 6), the final reply should include, as
+relevant to the archetype:
+
+- a concise **executive summary**;
+- the **archetype and harness pattern** chosen, and the **failure mode** it prevents;
+- the **assumptions** you made compiling the rough intent;
+- the **strongest outputs** — top findings / ideas / experiments / claims /
+  hypotheses — each with *why it matters*, *why it's non-obvious*, the *evidence for*
+  it, the *evidence against or weakening* it, and *what would falsify* it;
+- the **single best next action**;
+- generated Codex **`/goal`** prompts, if relevant;
+- **uncertainty and source gaps**, if relevant;
+- **safety notes**, if relevant;
+- **paths**: workflow script, journal, viewer, report/output artifacts, run summary.
+
+Keep confirmed evidence separate from plausible inference, and don't overclaim —
+missing metrics / artifacts / evidence are uncertainty, not success.
+
 ## When not to use
 
 - The user wants **Claude** subagents → use the native Workflow tool, not this.
@@ -325,6 +605,28 @@ It works for **any** run: barrier/phase or pipeline shapes, flat label-less runs
 aggregate node you expand inline; the Tree shows all), journal-only runs with no
 script (no model chips), and string/null results. `runner/test/view-run.test.js`
 smoke-renders all these shapes.
+
+## Summarize a run
+
+For a **cost / performance / reliability** report instead of a visual — what the
+run cost, where the time and tokens went, and whether anything looks off — point
+`summarize-run` at the journal (or run dir):
+
+```bash
+node ~/.claude/skills/codex-workflows/runner/bin/summarize-run.js <project-dir>
+#   --json        structured (the summary object)        --markdown   paste-ready
+#   --out PATH    write to a file                         --include-result  preview the return value
+```
+
+It reports agents (total / completed / null / cached / interrupted), agents·
+tokens·agent-time **by phase**, the **top 10 costliest and slowest** agents, a
+**model & effort** breakdown, **budget usage** (when the run recorded a ceiling),
+and **cache hit rate** on a resumed run — plus warnings (missing metrics, many
+nulls, interrupted agents, a single huge fan-out, default-effort cost). It's
+**read-only** (never touches the journal) and handles older journals that predate
+the per-agent metric fields. Use it to answer "how much did that cost / what was
+slow / did it all complete?" Paste the text report inline, or `--markdown` for a
+table. `run-workflow … --summary` prints the full report inline at the end.
 
 ## References
 

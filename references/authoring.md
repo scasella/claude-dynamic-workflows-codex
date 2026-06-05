@@ -1,5 +1,10 @@
 # Authoring Codex workflow scripts
 
+> You usually don't hand-author these: `/codex-workflows <one or two rough
+> sentences>` compiles a workflow script for you (see `SKILL.md` → *Compiling rough
+> intent into a workflow*). This reference is for understanding, tweaking, or
+> writing one by hand.
+
 A workflow script is plain JavaScript (not TypeScript) that the runner hosts in
 an isolated context. It begins with a pure-literal `meta`, then a body that uses
 the injected globals. Top-level `await` works, and a top-level `return` is the
