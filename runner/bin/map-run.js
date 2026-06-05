@@ -10,11 +10,11 @@
 
 import { statSync } from "node:fs";
 import { basename } from "node:path";
-import { locateRun, buildLiveRunModel, eventsPathFor } from "../src/runModel.js";
+import { locateRun, buildLiveRunModel, eventsPathFor, listJournalsForTarget } from "../src/runModel.js";
 import { renderMap } from "../src/asciiMap.js";
 
 function parseArgs(argv) {
-  const out = { target: null, script: null, journal: null, title: null, watch: false, color: null, maxAgents: 12, help: false };
+  const out = { target: null, script: null, journal: null, title: null, watch: false, color: null, maxAgents: 12, list: false, help: false };
   const rest = argv.slice(2);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -25,6 +25,7 @@ function parseArgs(argv) {
     else if (a === "--no-color") out.color = false;
     else if (a === "--color") out.color = true;
     else if (a === "--max-agents") out.maxAgents = Math.max(2, Number(rest[++i]) || 12);
+    else if (a === "--list") out.list = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.target) out.target = a;
   }
@@ -32,12 +33,20 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv);
+if (opts.list) {
+  const journals = listJournalsForTarget(opts.target || opts.journal);
+  if (!journals.length) { console.error("no journals found (looked in <dir>/.workflow-journal)"); process.exit(1); }
+  console.error("journals (newest first) — pick one with --journal <path>:");
+  for (const j of journals) process.stdout.write(`${new Date(j.mtimeMs).toISOString()}  ${String(j.size).padStart(9)}B  ${j.path}\n`);
+  process.exit(0);
+}
 if (opts.help || (!opts.target && !opts.journal)) {
   console.error(
     "usage: map-run <run-dir | journal.jsonl> [--script PATH] [--journal PATH]\n" +
-      "               [--watch] [--no-color] [--max-agents N] [--title TXT]\n" +
+      "               [--watch] [--no-color] [--max-agents N] [--title TXT] [--list]\n" +
       "\n" +
-      "  ASCII execution map of a run; --watch redraws live as the journal grows.",
+      "  ASCII execution map of a run; --watch redraws live as the journal grows.\n" +
+      "  --list shows a run dir's journals (newest first) to pick with --journal.",
   );
   process.exit(opts.help ? 0 : 1);
 }

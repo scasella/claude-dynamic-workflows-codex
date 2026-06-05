@@ -12,11 +12,11 @@
 //   summary, --markdown a paste-ready report. --out writes to a file (else stdout).
 
 import { writeFileSync } from "node:fs";
-import { locateRun } from "../src/runModel.js";
+import { locateRun, listJournalsForTarget } from "../src/runModel.js";
 import { summarizeRun, renderSummaryText, renderSummaryMarkdown } from "../src/runSummary.js";
 
 function parseArgs(argv) {
-  const out = { target: null, journal: null, script: null, title: null, json: false, markdown: false, out: null, includeResult: false, help: false };
+  const out = { target: null, journal: null, script: null, title: null, json: false, markdown: false, out: null, includeResult: false, list: false, help: false };
   const rest = argv.slice(2);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -27,6 +27,7 @@ function parseArgs(argv) {
     else if (a === "--markdown" || a === "--md") out.markdown = true;
     else if (a === "--out") out.out = rest[++i];
     else if (a === "--include-result") out.includeResult = true;
+    else if (a === "--list") out.list = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.target) out.target = a;
   }
@@ -34,16 +35,24 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv);
+if (opts.list) {
+  const journals = listJournalsForTarget(opts.target || opts.journal);
+  if (!journals.length) { console.error("no journals found (looked in <dir>/.workflow-journal)"); process.exit(1); }
+  console.error("journals (newest first) — pick one with --journal <path>:");
+  for (const j of journals) process.stdout.write(`${new Date(j.mtimeMs).toISOString()}  ${String(j.size).padStart(9)}B  ${j.path}\n`);
+  process.exit(0);
+}
 if (opts.help || (!opts.journal && !opts.target)) {
   console.error(
     "usage: summarize-run --journal <path.jsonl> [--json] [--markdown] [--out PATH]\n" +
-      "                     [--include-result] [--script PATH]\n" +
+      "                     [--include-result] [--script PATH] [--list]\n" +
       "       summarize-run <run-dir | journal.jsonl> [flags]\n" +
       "\n" +
       "  Concise cost / performance / reliability report for a workflow run.\n" +
       "  Reads the journal (+ event / result / meta sidecars when present); never\n" +
       "  writes them. Default output is text; --json / --markdown switch format,\n" +
-      "  --out writes to a file instead of stdout.",
+      "  --out writes to a file instead of stdout. --list shows a run dir's journals\n" +
+      "  (newest first) so you can pick one with --journal.",
   );
   process.exit(opts.help ? 0 : 1);
 }

@@ -190,7 +190,7 @@ export function createRuntime({
       : null;
     if (key && journal.hit(key)) {
       onLog?.(`  ◦ agent (cached): ${label}`);
-      onEvent?.({ type: "cached", label, phase: effectivePhase });
+      onEvent?.({ type: "cached", id: key, label, phase: effectivePhase });
       return journal.get(key);
     }
 
@@ -200,7 +200,9 @@ export function createRuntime({
       : "";
     onLog?.(`  · agent: ${label}${opts.schema ? "  [schema]" : ""}${effortTag}`);
     // Emit a lifecycle 'start' so live viewers can show this agent as running.
-    onEvent?.({ type: "start", label, phase: effectivePhase, effort: merged.effort ?? null, model: reqModel });
+    // `id` is the stable journal key (null only without a journal) — viewers and
+    // the run summary key by it so agents that share a display label never collide.
+    onEvent?.({ type: "start", id: key, label, phase: effectivePhase, effort: merged.effort ?? null, model: reqModel });
     // Capture per-agent metrics off a side channel (the model-facing return value
     // is unchanged); fold them into the journal entry alongside phase/effort/model.
     let metrics = null;
@@ -208,11 +210,11 @@ export function createRuntime({
       runAgent(prompt, {
         ...merged, defaultModel, pinnedModel, log: onLog,
         onMetrics: (m) => { metrics = m; },
-        onProgress: onProgress ? (text) => onProgress(label, text) : undefined,
+        onProgress: onProgress ? (text) => onProgress(label, text, key) : undefined,
       }),
     );
     onEvent?.({
-      type: "end", label, phase: effectivePhase, effort: merged.effort ?? null,
+      type: "end", id: key, label, phase: effectivePhase, effort: merged.effort ?? null,
       model: metrics?.model ?? reqModel,
       tokens: metrics?.tokens?.total ?? null,
       ms: metrics?.ms ?? null,

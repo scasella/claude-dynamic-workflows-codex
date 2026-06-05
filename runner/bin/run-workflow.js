@@ -327,11 +327,14 @@ if (!opts.noJournal) {
       else { clearInterval(progressTimer); progressTimer = null; } // idle → stop until next stream
     }, 700);
   };
-  onProgress = (label, text) => { progress.set(label, text); scheduleProgress(); };
+  // Key live partial output by the stable agent id (the journal key; falls back to
+  // label), so the viewer attaches it to the right agent even when labels repeat.
+  onProgress = (label, text, id) => { progress.set(id ?? label, text); scheduleProgress(); };
 
   onEvent = (e) => {
     // an agent that finished shows its real result, not a stale partial — drop it
-    if ((e.type === "end" || e.type === "cached") && e.label && progress.delete(e.label)) scheduleProgress();
+    const pk = e.id ?? e.label;
+    if ((e.type === "end" || e.type === "cached") && pk && progress.delete(pk)) scheduleProgress();
     try { appendFileSync(eventsPath, JSON.stringify({ t: Date.now(), ...e }) + "\n"); } catch {}
   };
 }

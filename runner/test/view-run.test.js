@@ -45,7 +45,7 @@ function smoke(htmlPath) {
   // persisted) the result drawer + inline Run-overview result render.
   const exercise = `
     ;view='tree';render();view='map';theme='light';render();theme='dark';render();
-    if(RUN.agents&&RUN.agents.length){openDrawer(RUN.agents[RUN.agents.length-1].label);closeDrawer();}
+    if(RUN.agents&&RUN.agents.length){openDrawer(RUN.agents[RUN.agents.length-1].id);closeDrawer();}
     if(typeof openResultDrawer==='function'&&RUN.result!=null){openResultDrawer();closeDrawer();view='tree';sel={type:'run'};render();}
     globalThis.__OUT={phases:RUN.phases.length,agents:RUN.agents.length,hasResult:RUN.result!=null};`;
   try {
@@ -73,6 +73,12 @@ const cases = [
     J({ key: "m1#0", label: "audit:obj", result: { verdict: "ok", problems: [{ issue: "a", severity: "high" }] } }),
     J({ key: "m2#0", label: "audit:str", result: "a plain string result" }),
     J({ key: "m3#0", label: "audit:nul", result: null }) ] },
+  // Same display label, distinct journal keys: the viewer keys agents by id, so all
+  // three must index/render separately (a label-keyed index would collapse them).
+  { name: "dup-labels", lines: [
+    J({ key: "d1#0", label: "worker", result: { n: 1 }, phase: "Work", model: "gpt-5.5", effort: "high", tokens: 10000, ms: 100 }),
+    J({ key: "d2#0", label: "worker", result: { n: 2 }, phase: "Work", model: "gpt-5.5", effort: "high", tokens: 20000, ms: 200 }),
+    J({ key: "d3#0", label: "worker", result: { n: 3 }, phase: "Work", model: "gpt-5.5", effort: "high", tokens: 30000, ms: 300 }) ] },
   { name: "empty", lines: [] },
   // Live run: 1 completed agent in the journal + 2 still running in the event
   // sidecar — the viewer should merge the running agents (status:'running').

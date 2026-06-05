@@ -16,7 +16,7 @@
 import { writeFileSync, statSync, renameSync } from "node:fs";
 import { join, basename, resolve } from "node:path";
 import { execFile } from "node:child_process";
-import { locateRun, buildLiveRunModel, eventsPathFor, progressPathFor } from "../src/runModel.js";
+import { locateRun, buildLiveRunModel, eventsPathFor, progressPathFor, listJournalsForTarget } from "../src/runModel.js";
 
 // Write atomically so a watching browser never loads a half-written file:
 // write to a unique temp path in the same dir, then rename (atomic on POSIX).
@@ -44,7 +44,7 @@ const nowGen = () => Date.now(); // gen = wall-clock ms: monotonic enough + cros
 
 // ── args ──────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false, settle: false };
+  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false, settle: false, list: false };
   const rest = argv.slice(2);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -55,6 +55,7 @@ function parseArgs(argv) {
     else if (a === "--open") out.open = true;
     else if (a === "--watch") out.watch = true;
     else if (a === "--settle") out.settle = true; // final render: static HTML + a final sidecar so an open live page settles
+    else if (a === "--list") out.list = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.target) out.target = a;
   }
@@ -62,9 +63,17 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv);
+if (opts.list) {
+  const journals = listJournalsForTarget(opts.target || opts.journal);
+  if (!journals.length) { console.error("no journals found (looked in <dir>/.workflow-journal)"); process.exit(1); }
+  console.error("journals (newest first) — pick one with --journal <path>:");
+  for (const j of journals) process.stdout.write(`${new Date(j.mtimeMs).toISOString()}  ${String(j.size).padStart(9)}B  ${j.path}\n`);
+  process.exit(0);
+}
 if (opts.help || (!opts.target && !opts.journal)) {
   console.error(
-    "usage: view-run <run-dir | journal.jsonl> [--script PATH] [--journal PATH] [--out PATH] [--title TXT] [--open]",
+    "usage: view-run <run-dir | journal.jsonl> [--script PATH] [--journal PATH] [--out PATH] [--title TXT] [--open] [--list]\n" +
+      "  --list shows a run dir's journals (newest first) so you can pick one with --journal.",
   );
   process.exit(opts.help ? 0 : 1);
 }
@@ -387,17 +396,19 @@ const elapsedOf=(a)=>a&&a.startedAt?fmtMs(Date.now()-a.startedAt):null;
 // Built once instead of re-filtering/sorting the whole agent list on every tree,
 // map, phase-card, and metric read — cheaper for large runs and the single source
 // for phase progress/aggregate stats.
-const _agentsByPhase=new Map(), _agentByLabel=new Map();
+const _agentsByPhase=new Map(), _agentById=new Map();
 const _phaseStatsCache=new Map();
 function reindex(){
-  _agentsByPhase.clear(); _agentByLabel.clear(); _phaseStatsCache.clear();
-  RUN.agents.forEach((a)=>{ _agentByLabel.set(a.label,a); const arr=_agentsByPhase.get(a.phase)||[]; arr.push(a); _agentsByPhase.set(a.phase,arr); });
+  _agentsByPhase.clear(); _agentById.clear(); _phaseStatsCache.clear();
+  RUN.agents.forEach((a)=>{ _agentById.set(a.id,a); const arr=_agentsByPhase.get(a.phase)||[]; arr.push(a); _agentsByPhase.set(a.phase,arr); });
   _agentsByPhase.forEach((arr)=>arr.sort((a,b)=>a.order-b.order));
   computeModelColors();
 }
 reindex(); // rebuilt on every live data swap (RUN reassigned) so views read fresh
 const agentsInPhase=(title)=>_agentsByPhase.get(title)||[];
-const agentByLabel=(label)=>_agentByLabel.get(label);
+// Look agents up by their stable id (the journal key); label is display-only and
+// may repeat, so it is never used as an identity key.
+const agentById=(id)=>_agentById.get(id);
 function phaseStats(title){
   if(_phaseStatsCache.has(title)) return _phaseStatsCache.get(title);
   let tokens=0,ms=0,done=0,running=0; const a=agentsInPhase(title);
@@ -439,7 +450,7 @@ function loadState(){
     if(s.sel) sel=s.sel;
     if(s.collapsed) Object.assign(collapsed,s.collapsed);
     if(s.expandedPhases) Object.assign(expandedPhases,s.expandedPhases);
-    drawerAgent = s.drawerAgent && RUN.agents.some(a=>a.label===s.drawerAgent) ? s.drawerAgent : null;
+    drawerAgent = s.drawerAgent && RUN.agents.some(a=>a.id===s.drawerAgent) ? s.drawerAgent : null;
     drawerResult = !drawerAgent && !!s.drawerResult && RUN.result!==undefined && RUN.result!==null;
     if(typeof s.mapZoom==='number'){ mapZoom=s.mapZoom; mapTx=s.mapTx; mapTy=s.mapTy; mapUserAdjusted=!!s.mapUserAdjusted; }
     __restoreScroll={main:s.mainScroll||0, side:s.sideScroll||0};
@@ -557,7 +568,7 @@ function buildTree(){
       const wrap=h('div',{class:'children'});
       kids.forEach(a=>{
         const lbl=a.label.includes(':')?a.label.split(':').slice(1).join(':')||a.label:a.label;
-        const n=node({type:'agent',id:a.label},'',lbl,null,'agent',false,null,isRunning(a));
+        const n=node({type:'agent',id:a.id},'',lbl,null,'agent',false,null,isRunning(a));
         n.append(agentTreeMeta(a));
         wrap.append(n);
       });
@@ -727,7 +738,7 @@ function summarize(r){
 function renderMain(){
   if(sel.type==='run') return renderRun();
   if(sel.type==='phase') return renderPhase(RUN.phases.find(p=>p.title===sel.id));
-  if(sel.type==='agent') return renderAgent(agentByLabel(sel.id));
+  if(sel.type==='agent') return renderAgent(agentById(sel.id));
   return h('div',{});
 }
 
@@ -749,7 +760,7 @@ function renderRun(){
       if(r.hero&&r.hero.headline){ hero.append(h('div',{style:{fontSize:'16px',fontWeight:600,marginTop:'4px'}},r.hero.headline));
         if(r.hero.subhead) hero.append(h('div',{class:'sub'},r.hero.subhead)); }
       if(r.why_this_wins) hero.append(h('div',{class:'prose',style:{marginTop:'10px'}},r.why_this_wins));
-      hero.append(h('div',{style:{marginTop:'10px'}}, h('a',{href:'#',onclick:(e)=>{e.preventDefault();select({type:'agent',id:fa.label});}}, 'Open full result → '+fa.label)));
+      hero.append(h('div',{style:{marginTop:'10px'}}, h('a',{href:'#',onclick:(e)=>{e.preventDefault();select({type:'agent',id:fa.id});}}, 'Open full result → '+fa.label)));
       m.append(hero);
     }
   }
@@ -776,7 +787,7 @@ function renderRun(){
       m.append(h('h2',{class:'sec'},'Costliest agents'));
       const cg=h('div',{class:'card'});
       costly.forEach(a=>{
-        const row=h('div',{class:'metarow',style:{cursor:'pointer'},onclick:()=>select({type:'agent',id:a.label})});
+        const row=h('div',{class:'metarow',style:{cursor:'pointer'},onclick:()=>select({type:'agent',id:a.id})});
         row.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
         if(a.ms!=null) row.append(h('span',{class:'pill'},fmtMs(a.ms)));
         row.append(h('span',{class:'label-mono',style:{fontWeight:600}},a.label));
@@ -815,7 +826,7 @@ function renderPhase(p){
   if(p.detail) m.append(h('div',{class:'sub'},p.detail));
   m.append(h('h2',{class:'sec'},'Agents'));
   agentsInPhase(p.title).forEach(a=>{
-    const c=h('div',{class:'card agentcard',onclick:()=>select({type:'agent',id:a.label})});
+    const c=h('div',{class:'card agentcard',onclick:()=>select({type:'agent',id:a.id})});
     const top=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}});
     top.append(h('span',{class:'label-mono',style:{fontWeight:600}},a.label));
     if(a.model) top.append(h('span',{class:'chip',style:{color:modelColor[a.model],borderColor:modelColor[a.model]+'55'}},a.model));
@@ -925,8 +936,8 @@ function renderFooter(){
 function agentNode(a){
   const run=isRunning(a), el=elapsedOf(a);
   const tip=(a.model?'['+a.model+(a.effort?' · '+a.effort:'')+'] ':'')+(run?('running'+(el?' '+el:'')+' · '):(a.tokens!=null?fmtTokens(a.tokens)+' tok · ':''))+(summarize(a.result)||a.label);
-  const open=()=>openDrawer(a.label);
-  const n=h('div',{class:'mnode agent'+(run?' running':'')+(drawerAgent===a.label?' selected':''),title:tip,role:'button',tabindex:'0',
+  const open=()=>openDrawer(a.id);
+  const n=h('div',{class:'mnode agent'+(run?' running':'')+(drawerAgent===a.id?' selected':''),title:tip,role:'button',tabindex:'0',
     'aria-label':'Agent '+a.label+(run?', running':', completed')+(a.ms!=null?', '+fmtMs(a.ms):''),
     onclick:open, onkeydown:(e)=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();open();} }});
   n.append(h('span',{class:'msdot'+(run?' amber':'')}));
@@ -958,10 +969,10 @@ function phaseRow(p,i){
   let visible=all, hidden=[];
   if(all.length>MAP_CAP && !expanded){
     const slots=Math.max(1, MAP_CAP-1);
-    const pick=new Set(all.filter(isRunning).map(a=>a.label));
-    for(const a of all){ if(pick.size>=slots) break; pick.add(a.label); }
-    visible=all.filter(a=>pick.has(a.label));
-    hidden=all.filter(a=>!pick.has(a.label));
+    const pick=new Set(all.filter(isRunning).map(a=>a.id));
+    for(const a of all){ if(pick.size>=slots) break; pick.add(a.id); }
+    visible=all.filter(a=>pick.has(a.id));
+    hidden=all.filter(a=>!pick.has(a.id));
   }
   // a phase whose agents haven't started yet (live runs reach it later): its width
   // isn't known until the run gets there (dynamic workflows size it at runtime), so
@@ -1024,7 +1035,7 @@ function resultRow(){
     if(snip) note=h('div',{class:'mnote'}, String(snip).slice(0,240));
   } else {
     const fa=finalAgent();
-    if(fa){ open=()=>openDrawer(fa.label); sub='final agent';
+    if(fa){ open=()=>openDrawer(fa.id); sub='final agent';
       if(fa.result&&fa.result.recommended_direction) note=h('div',{class:'mnote'},fa.result.recommended_direction); }
   }
   const node=h('div',{class:'mnode endpoint result-node'+(drawerResult?' selected':''),role:open?'button':null,tabindex:open?'0':null,
@@ -1132,8 +1143,8 @@ function zoomAt(factor,cx,cy){
 }
 
 // detail drawer (progressive disclosure on a node)
-function buildDrawer(label){
-  const a=agentByLabel(label); if(!a) return h('div',{});
+function buildDrawer(id){
+  const a=agentById(id); if(!a) return h('div',{});
   const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
   back.append(h('div',{class:'drawer-backdrop',onclick:closeDrawer}));
   const panel=h('div',{class:'drawer-panel'+(__suppressMotion?'':' intro'),role:'dialog','aria-modal':'true','aria-label':'Agent '+a.label});
@@ -1147,7 +1158,7 @@ function buildDrawer(label){
   if(a.tokens!=null) chips.append(h('span',{class:'pill'},fmtTokens(a.tokens)+' tok'));
   if(a.ms!=null) chips.append(h('span',{class:'pill'},fmtMs(a.ms)));
   chips.append(statusChip(a));
-  chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerAgent=null;select({type:'agent',id:label});}},'open in tree ↗'));
+  chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerAgent=null;select({type:'agent',id});}},'open in tree ↗'));
   top.append(chips);
   panel.append(top);
   const body=h('div',{class:'drawer-body'});
@@ -1182,8 +1193,8 @@ function buildResultDrawer(){
 }
 let __drawerReturnFocus=null;
 function focusClose(){ if(typeof requestAnimationFrame!=='undefined') requestAnimationFrame(()=>{ const x=document.getElementById('drawer-close'); if(x&&x.focus) x.focus(); }); }
-function openDrawer(label){
-  __drawerReturnFocus=document.activeElement; drawerAgent=label; drawerResult=false;
+function openDrawer(id){
+  __drawerReturnFocus=document.activeElement; drawerAgent=id; drawerResult=false;
   render(); // re-render so the node shows selected + the dock mounts consistently
   focusClose(); saveState();
 }

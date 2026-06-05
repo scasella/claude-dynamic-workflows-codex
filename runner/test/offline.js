@@ -4,13 +4,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractMeta, runWorkflowSource } from "../src/runWorkflow.js";
 import { effortForLayerWidth, schemaSkeleton } from "../src/runtime.js";
 import { isGitRepo, createWorktree } from "../src/worktree.js";
 import { identityHash, Journal } from "../src/journal.js";
+import { liveState, buildRunModel, locateRun, listJournals } from "../src/runModel.js";
 import { resolveModel, pickFrontier } from "../src/modelMap.js";
 import { loadAgentType } from "../src/agentTypes.js";
 import { isRetryable, strictifySchema } from "../src/codexAgent.js";
@@ -427,6 +428,99 @@ const exec = promisify(execFile);
   assert.deepEqual(authored.properties.painPoints.items.required, ["pain", "buyer"], "the input schema is not mutated");
   // non-object schemas pass through untouched
   assert.deepEqual(strictifySchema({ type: "string" }), { type: "string" });
+}
+
+// 22) lifecycle events carry the stable agent id (= journal key) on start/end, and
+//     a cached replay carries it too — so viewers/summary key by id, not label.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-eventid-"));
+  const jpath = join(dir, "e.jsonl");
+  const j = new Journal(jpath, { reuse: false });
+  await j.load();
+  const echo = async () => "ok";
+  const ev1 = [];
+  await runWorkflowSource(
+    'export const meta={name:"e"}; await agent("a",{label:"x"}); return 1;',
+    { runAgent: echo, journal: j, onEvent: (e) => ev1.push(e) },
+  );
+  const jline = JSON.parse((await readFile(jpath, "utf8")).trim().split("\n")[0]);
+  const start = ev1.find((e) => e.type === "start"), end = ev1.find((e) => e.type === "end");
+  assert.ok(jline.key, "journal entry has a key");
+  assert.equal(start.id, jline.key, "start event carries the journal key as id");
+  assert.equal(end.id, jline.key, "end event carries the journal key as id");
+  assert.equal(start.label, "x", "display label preserved on the event");
+  // a second run reuses the journal → a cached event, also carrying the id
+  const j2 = new Journal(jpath, { reuse: true });
+  await j2.load();
+  const ev2 = [];
+  await runWorkflowSource(
+    'export const meta={name:"e"}; await agent("a",{label:"x"}); return 1;',
+    { runAgent: echo, journal: j2, onEvent: (e) => ev2.push(e) },
+  );
+  const cached = ev2.find((e) => e.type === "cached");
+  assert.ok(cached, "second run hits the cache");
+  assert.equal(cached.id, jline.key, "cached event carries the journal key as id");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 23) liveState keys by id: two agents that share a label are tracked separately;
+//     events without an id fall back to label (legacy).
+{
+  const ls = liveState([
+    { t: 1, type: "start", id: "k1#0", label: "dup", phase: "P" },
+    { t: 2, type: "start", id: "k2#0", label: "dup", phase: "P" },
+    { t: 3, type: "end", id: "k1#0", label: "dup" },
+  ]);
+  assert.equal(ls.running.length, 1, "same label, distinct ids → only the unended one is running");
+  assert.equal(ls.running[0].id, "k2#0", "running agent keyed by id");
+  assert.equal(ls.running[0].label, "dup", "label preserved for display");
+  const legacy = liveState([
+    { t: 1, type: "start", label: "a" }, { t: 2, type: "start", label: "b" }, { t: 3, type: "end", label: "a" },
+  ]);
+  assert.equal(legacy.running.length, 1, "id-less events fall back to label");
+  assert.equal(legacy.running[0].label, "b");
+}
+
+// 24) buildRunModel exposes a stable id and does NOT collapse same-label agents;
+//     a keyless entry falls back to label as its id.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-rm-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jpath = join(jdir, "r.workflow.jsonl");
+  await writeFile(jpath, [
+    JSON.stringify({ key: "a#0", label: "dup", result: 1 }),
+    JSON.stringify({ key: "b#0", label: "dup", result: 2 }),
+  ].join("\n"));
+  const run = buildRunModel({ journalPath: jpath });
+  assert.equal(run.agents.length, 2, "two entries with the same label are not collapsed");
+  assert.deepEqual(run.agents.map((a) => a.id).sort(), ["a#0", "b#0"], "each agent has its journal key as id");
+  assert.ok(run.agents.every((a) => a.label === "dup"), "label preserved");
+  await writeFile(jpath, JSON.stringify({ label: "solo", result: 1 }));
+  assert.equal(buildRunModel({ journalPath: jpath }).agents[0].id, "solo", "no key → id falls back to label");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 25) locateRun + listJournals: with several journals in one run dir, default to the
+//     most recently MODIFIED (not alphabetical); --journal overrides.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-loc-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const older = join(jdir, "aaa.workflow.jsonl"); // sorts FIRST alphabetically
+  const newer = join(jdir, "zzz.workflow.jsonl"); // sorts LAST alphabetically
+  await writeFile(older, JSON.stringify({ key: "o#0", label: "o", result: 1 }));
+  await writeFile(newer, JSON.stringify({ key: "n#0", label: "n", result: 1 }));
+  await utimes(older, new Date(Date.now() - 100_000), new Date(Date.now() - 100_000));
+  await utimes(newer, new Date(), new Date());
+  const list = listJournals(dir);
+  assert.equal(list[0].name, "zzz.workflow.jsonl", "listJournals: newest first by mtime");
+  assert.equal(list.length, 2);
+  const loc = locateRun({ target: dir });
+  assert.ok(loc.journalPath.endsWith("zzz.workflow.jsonl"), "locateRun defaults to the most recently modified journal");
+  const loc2 = locateRun({ target: dir, journal: older });
+  assert.ok(loc2.journalPath.endsWith("aaa.workflow.jsonl"), "--journal overrides the mtime default");
+  await rm(dir, { recursive: true, force: true });
 }
 
 console.log("offline checks passed ✓");
