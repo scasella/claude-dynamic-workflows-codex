@@ -25,7 +25,8 @@ workflow script (.js, unchanged)
   src/runtime.js ──────► parallel / pipeline / phase / log / budget / workflow
         │                (provider-neutral; concurrency cap = min(16, cores-2))
         ▼
-  agent(prompt, opts) ─► src/codexAgent.js   ◄── THE SEAM
+  agent(prompt, opts) ─► src/codexAgent.js   ◄── THE SEAM (one-shot: 1 thread, 1 turn)
+  agent.start(...)    ─► src/codexSession.js ◄── sessionful: 1 thread, MANY turns
         │
         ▼
   src/appServerClient.js ─► spawns `codex app-server --listen stdio://`
@@ -37,13 +38,47 @@ workflow script (.js, unchanged)
 | ----------------------------- | ---------------------------------------------------------- |
 | `agent(prompt)` → final text  | `thread/start` + `turn/start`, last `agentMessage.text`    |
 | `agent(prompt, {schema})`     | `turn/start({ outputSchema })` → `JSON.parse(final text)`  |
+| `agent.start(prompt)`         | `thread/start` + first `turn/start`, returns before completion |
+| `session.steer(msg)`          | another `turn/start` on the **same** `threadId` (a follow-up turn) |
+| `session.cancel()`            | `turn/interrupt` → await `turn/completed{status:interrupted}` |
 | `agentType: 'x'`              | loads `.claude/agents/x.md` → `developerInstructions`      |
 | `model` (Claude id or alias)  | remapped to an available Codex model via `model/list`      |
 | `effort`                      | `effort` on thread + turn                                  |
 | sandbox / permissions         | `approvalPolicy:"never"` + `sandbox` (default `workspace-write`) |
 | transient errors              | retry with exponential backoff; app-server auto-reconnect  |
-| `budget.spent()`              | summed `thread/tokenUsage/updated` totals                  |
+| `budget.spent()`              | summed `thread/tokenUsage/updated` totals (cumulative per thread) |
 | `parallel` / `pipeline`       | unchanged — pure JS scheduling                             |
+
+### Sessionful workers (`agent.start` / `agent.waitAny` / `session.*`)
+
+`agent()` is one thread + one turn. `agent.start()` opens a thread and begins the
+first turn but **returns before it finishes**, so a workflow can spawn long-lived
+workers, `agent.waitAny([…])` for the first to become actionable, and `steer()` a
+worker with **follow-up turns on the same thread** (it keeps its context — Codex
+threads are multi-turn, exactly like the SDK's `thread.run()`-again). See
+[`authoring.md` → *Sessionful workers*](authoring.md#sessionful-workers-long-lived-steerable)
+for the full API, the controller pattern, and the human interaction model
+(`hands_off` / `checkpointed` / `interactive`). Key runner facts:
+
+- **Concurrency:** a turn holds one semaphore slot from start to settle, so a
+  *detached running worker still counts against* `min(16, cores-2)`. `agent.start`
+  blocks if the cap is saturated (like `agent()`), then returns once a slot frees.
+- **Budget:** every start/steer gates on `--budget` (same `BUDGET_EXCEEDED`); each
+  turn's tokens are the per-thread cumulative delta.
+- **Resume:** sessions are **live-only / non-resumable**. `agent()` resume is
+  unchanged; a `--resume` run *re-runs* sessions live. Turns are journaled under a
+  `sess:<id>#<turn>` key for the viewer/summary but are never served from the resume
+  cache (no fake thread resurrection). True cross-run resume is possible in principle
+  via `thread/resume` (persist the `threadId`) — deliberately out of scope for v1.
+- **Finalization:** `runWorkflowSource` closes any sessions left open in a `finally`
+  (cancels active turns, removes worktrees). `isolation:'worktree'` persists across
+  steers, cleaned only on `close()`/finalization.
+- **Events:** session turns emit the same `start`/`end` lifecycle events as `agent()`
+  (with extra `kind:"session"`, `sessionId`, `turn`, `status` fields), so `map-run` /
+  `view-run` / `summarize-run` keep working.
+- **Seam:** the runtime takes a `startSession` option (default
+  `codexSession.startCodexSession`) so offline tests drive sessions with a fake
+  driver — no app-server, no tokens.
 
 ## Requirements
 
@@ -312,7 +347,11 @@ the **resume journal** (`--resume`), the **named-workflow registry**
 **`--plan` dry-run estimation**, **`--budget-meter total|output`**, **`--watch`
 live viewer**, the **`summarize-run` cost/performance/reliability report**
 (text/json/markdown, with an automatic end-of-run recap), one-level
-`workflow({scriptPath} | "name")` nesting, and the CLI.
+`workflow({scriptPath} | "name")` nesting, **sessionful workers** (`agent.start` /
+`agent.waitAny` / `session.steer`/`wait`/`poll`/`cancel`/`close` — long-lived,
+multi-turn, steerable Codex threads with per-turn budget/concurrency, lifecycle
+events, runtime finalization, and worktree persistence across turns; live-only /
+non-resumable), and the CLI.
 Validated end-to-end on real multi-phase runs (parallel schema reviewers feeding a
 consolidator), including budget-stop-then-resume. See `examples/demo/` for a
 bundled sample run.
@@ -320,7 +359,13 @@ bundled sample run.
 **Extension points (not yet wired):**
 
 - **Warm-context resume** — the journal replays *results*; it does not yet reuse
-  Codex thread state via `thread/resume` / `thread/fork`.
+  Codex thread state via `thread/resume` / `thread/fork`. Sessionful workers
+  (`agent.start`) run *within* a process but are **live-only**: a `--resume` re-runs
+  them. `thread/resume` (persisting `threadId`s) is the path to true cross-run
+  session continuity — deliberately deferred.
+- **`interactive` involvement mode** — live human steering of running workers via the
+  viewer / a command sidecar. v1 ships `hands_off` and `checkpointed` (checkpoint by
+  structured `needs_human` return); `interactive` is documented but not built.
 - **Budget accounting across a resume** — totals are per process; `--budget-meter`
   selects total vs output (the native pool), but a `budget`-driven loop can still
   differ slightly across a resume since cached agents replay at 0 tokens.

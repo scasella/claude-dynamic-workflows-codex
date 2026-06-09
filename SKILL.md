@@ -239,12 +239,55 @@ the failure mode it prevents.**
 | `fresh_context_review_gates` | self-preferential judging | producers never judge their own work; reviewers get artifacts + rubric only |
 | `bounded_empirical_epoch` | metric gaming, runaway cost | run evals with keep/discard rules + a hard budget/round cap |
 | `goal_contract_compiler` | vague goals, missing artifacts/falsification | compile intent → objective, non-goals, allowed actions, success/failure, artifacts, stop |
+| `sessionful_controller_loop` | babysitting, lost worker context, blind fan-out | spawn long-lived `agent.start` workers → `agent.waitAny` for the first → a **controller agent** decides accept / steer (same thread) / spawn / verify / stop → human only at checkpoints |
 
 Full failure-mode vocabulary to draw from: **agentic laziness · vague goals ·
 self-preferential judging · unsupported claims · context contamination · weak
 ranking · premature convergence · thin-wrapper ideation · untrusted-input risk ·
 overbuilding · missing artifacts · missing falsification · metric gaming · source
 fabrication · file-edit collisions · runaway cost.**
+
+### 4b · One-shot `agent()` vs sessionful workers
+
+Most workflows use one-shot `agent()` — a fresh thread+turn per call, which is what
+fights goal drift and self-preferential bias, and it's the only **resumable** form.
+Reach for **sessionful workers** (`agent.start` / `agent.waitAny` / `session.steer`)
+only when the job genuinely needs a worker to *keep its context across turns*:
+
+**Use sessionful when** —
+- a child worker may need **follow-up steering on the same context** (steer it, don't
+  restart it from a cold prompt);
+- the workflow benefits from **waiting for the first of several** long-running workers
+  (`agent.waitAny`) and reacting, rather than blocking on all of them;
+- a **controller loop** will inspect snapshots and decide accept / steer / spawn /
+  verify / stop (the `sessionful_controller_loop` pattern);
+- the task is **exploratory, long-running, or iterative** (investigation, debugging,
+  incremental build-and-correct).
+
+**Prefer one-shot `agent()` when** —
+- the work is **one-shot** (a finding, a judgment, a synthesis);
+- **independent fresh-context review** is the point (review gates, adversarial verify
+  — a steered worker carries bias forward);
+- **resume caching matters** more than continuity (sessions are live-only: a
+  `--resume` re-runs them);
+- no follow-up steering is expected.
+
+**Compile, don't babysit.** When you author a sessionful workflow, the human sets
+**policy** (goal, budget, sandbox, **involvement mode**, stop/escalation triggers) —
+they do *not* steer each child. A **controller agent** makes the semantic call; the
+script enforces it; the human re-enters only at a checkpoint. Declare an involvement
+mode and default to **`checkpointed`**:
+- `hands_off` — never pause; safe defaults, mark uncertainty, avoid risky/destructive
+  actions.
+- `checkpointed` *(default)* — pause only at plan / write / budget / scope gates.
+- `interactive` — live steering (future; don't author for it).
+
+Never make the workflow block on live human input. When a decision truly needs a
+human (scope, cost, risk, destructive action, value judgment), **return** a
+structured checkpoint — `{ status: "needs_human", question, choices?,
+recommendedDefault, reason, ledger, resumeInstructions }` — and stop. The pattern is
+in `examples/sessionful-workers.workflow.js` and `references/authoring.md` →
+*Sessionful workers*.
 
 ### 5 · Build the task contract
 
@@ -456,6 +499,11 @@ Globals:
 - `workflow(ref, args?)` → run another script inline (one level). `ref` is a
   `{ scriptPath }`, a path string, or a saved-workflow **name** resolved from
   `.claude/workflows/` then `~/.claude/workflows/`.
+- `agent.start(prompt, opts?)` → an **`AgentSession`** (long-lived worker; returns
+  before the turn finishes). `agent.waitAny(sessions, opts?)` → the first actionable
+  one. `session.steer(msg, {wait})` runs a follow-up turn **on the same thread**;
+  `session.wait/poll/cancel/close`. Sessionful = **live-only / non-resumable**; use it
+  only for steerable/iterative work (see *4b · One-shot vs sessionful workers*).
 
 Key `agent()` opts: `schema` (JSON Schema → Codex `outputSchema`, result parsed),
 `model` (Claude ids/aliases auto-map to a Codex model), `agentType` (loads
@@ -469,7 +517,10 @@ Read **`references/authoring.md`** for the full guide and the standard quality
 patterns (adversarial / **majority refute-by-default** verify, judge panel,
 **loop-until-dry**, **fresh-context review gate**, multi-modal sweep), and
 **`examples/`** for runnable templates — `hello`, `review`, `bug-hunt`
-(loop-until-dry + majority verify), `review-gates` (producer ≠ reviewer).
+(loop-until-dry + majority verify), `review-gates` (producer ≠ reviewer), and the
+**sessionful** demos `sessionful-workers`, `warm-context-interrogation` (load once,
+ask many), `flaky-bug-perturbation` (hold + perturb live state), `hedged-take-first-win`
+(race + cancel), `lead-following-research`, `stateful-dialogue`, `agent-foreman`.
 
 ## Running
 

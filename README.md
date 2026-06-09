@@ -9,7 +9,7 @@
 
 ![Execution map](docs/map-dark.png)
 
-You describe a task; Claude Code writes a [dynamic-workflow](https://code.claude.com/docs/en/workflows) script — `agent()` / `parallel()` / `pipeline()` / `phase()` / `budget` — and runs it across dozens of GPT-5 agents instead of Claude subagents. The runtime holds the loop, branching, and intermediate results, so your context only sees the final answer — and you watch it build as an interactive map. Great for codebase audits, large migrations, cross-checked research, and idea generation.
+You describe a task; Claude Code writes a [dynamic-workflow](https://code.claude.com/docs/en/workflows) script — `agent()` / `parallel()` / `pipeline()` / `phase()` / `budget` — and runs it across dozens of GPT-5 agents instead of Claude subagents. The runtime holds the loop, branching, and intermediate results, so your context only sees the final answer — and you watch it build as an interactive map. And unlike the native one-shot DSL, workers here can stay **live** — steer a worker on warm context, race several and cancel the losers, or let a controller adapt the plan as results land ([Beyond one-shot ↓](#beyond-one-shot-sessionful-workers)). Great for codebase audits, large migrations, cross-checked research, and idea generation.
 
 This repo is **two ways in**:
 
@@ -297,6 +297,43 @@ Monthly                     →  /codex-workflows Mine recurring agent failures 
 
 ---
 
+## Beyond one-shot: sessionful workers
+
+The native dynamic-workflows DSL gives you **one-shot** agents: `agent()` runs once and returns; `parallel()` waits for all of them. This re-host keeps all of that, faithfully — and adds the part the native DSL doesn't have: **long-lived workers you can steer, race, and cancel.** This is what most separates the project from the native feature.
+
+> `agent()` returns an *answer*. `agent.start()` returns a *worker* — one you can talk to again on warm context, race against its siblings, and steer mid-task.
+
+|  | Native dynamic workflows | This re-host |
+| :--- | :--- | :--- |
+| Fan out + wait | `agent()` · `parallel()` | **same** — faithful re-host |
+| **Stateful** — ask a warm worker again | a new `agent()` is a cold thread; re-reads from scratch | `agent.start` + `session.steer` — same thread, keeps full context |
+| **Reactive** — first-to-finish, cancel the rest | `parallel()` barrier — waits for the slowest, pays for all | `agent.waitAny` + `session.cancel` |
+| **Adaptive** — rewrite the plan mid-run | a DAG fixed at author time | a controller agent: accept / steer / spawn / cancel / stop |
+
+The top row is the honest part: the shared DSL behaves exactly as documented; the rest is purely additive.
+
+```js
+// race two approaches, act on whichever lands first, then keep questioning it — warm
+const a = await agent.start("Find the cause working backward from the symptom.", { sandbox: "read-only" });
+const b = await agent.start("Find the cause assuming a recent regression.",      { sandbox: "read-only" });
+const first = await agent.waitAny([a, b]);                          // wake on the first to finish
+await first.session.steer("Now give me the exact fix.", { wait: true }); // same thread, keeps context
+for (const s of first.pendingSessions) await s.cancel();           // stop the losers
+```
+
+**Why you'd reach for it**
+
+- **Load once, ask many** — drop a huge repo / data-room into one worker, then `steer` a stream of follow-ups cheaply, instead of re-reading it on every question.
+- **Race and cut losers** — fire several strategies at one problem, keep the first that works, cancel the rest.
+- **Follow the evidence** — a controller agent chases the strongest lead instead of a question list frozen at author time.
+
+**Runnable examples** (all `--plan`-safe — dry-run any with `--plan`, no Codex, no tokens):
+`sessionful-workers` (the intro) · `warm-context-interrogation` (load once, ask many) · `hedged-take-first-win` (race + cancel) · `flaky-bug-perturbation` (hold a repro, perturb it) · `lead-following-research` (controller chases leads) · `stateful-dialogue` (memory vs. a cold judge) · `agent-foreman` (supervised autonomy, escalate at forks).
+
+> **v1 scope (honest):** one-shot `agent()` is resumable as always; **sessions are live-only** — a `--resume` re-runs them, and a worker that needs a human returns a structured `needs_human` checkpoint rather than blocking on live input (live "interactive" steering is future). Full API, the controller pattern, and the `hands_off` / `checkpointed` / `interactive` involvement modes → [`references/authoring.md`](references/authoring.md#sessionful-workers-long-lived-steerable).
+
+---
+
 ## Without Claude Code (standalone CLI)
 
 The runner and viewer work on their own — no Claude Code required.
@@ -370,6 +407,8 @@ return { a, b };
 
 There's also a one-command live demo (needs `codex login`): `npm run demo:live` fans out agents to gather today's US market news and shows the run building as a live ASCII map.
 
+Sessionful workers — `agent.start` / `agent.waitAny` / `session.steer` — run standalone here too; see [**Beyond one-shot: sessionful workers**](#beyond-one-shot-sessionful-workers) above for the full picture.
+
 ---
 
 ## How it works
@@ -380,6 +419,8 @@ Claude Code's workflow runtime is sealed inside its binary, so this is an **exte
 | :--- | :--- |
 | `agent(prompt)` → final text | `thread/start` + `turn/start`, last `agentMessage.text` |
 | `agent(prompt, { schema })` | native `turn/start.outputSchema` (auto-normalized for strict mode) → parsed JSON |
+| `agent.start(prompt)` → session | `thread/start` + first `turn/start`, returns before completion (live-only) |
+| `session.steer(msg)` | another `turn/start` on the **same** thread — a follow-up turn |
 | `agentType: 'x'` | loads `.claude/agents/x.md` → `developerInstructions` |
 | Claude model id / alias | remapped to an available Codex model via `model/list` |
 | sandbox / permissions | `approvalPolicy:"never"` + sandbox |
@@ -405,6 +446,7 @@ Workflow agents run with `approvalPolicy: "never"` inside a Codex sandbox (defau
 
 - This is a **standalone re-host**, not the in-Claude-Code-native experience: no in-session background tasks, no `/workflows` progress UI, no save-as-`/command` — though the live viewer and inline map cover monitoring, and `workflow("name")` resolves saved workflows from `.claude/workflows/`.
 - A couple of native nuances aren't replicated 1:1: **warm-context resume** (the journal replays *results*, not Codex thread state via `thread/fork`), and budget accounting is per-process (`--budget-meter` selects total vs the native output-token pool). The map models barrier/phase structure (a clean approximation for pipeline-shaped runs). Details in the internals doc.
+- **Sessionful workers are live-only.** `agent.start()` workers run within a process but are **not** resumable across one (a `--resume` re-runs them); one-shot `agent()` resume is unchanged. The `interactive` involvement mode (live human steering of running workers) is documented but not built — v1 escalates to the human via a structured `needs_human` return (`hands_off` / `checkpointed`).
 
 ## Development
 
@@ -427,14 +469,18 @@ runner/                   standalone runner (Node, zero deps)
   bin/summarize-run.js    cost / performance / reliability report (text/json/markdown)
   bin/demo-live.js        run an example + watch it build live (npm run demo:live)
   src/                    codexAgent (the seam) + runtime, transport, helpers
+  src/codexSession.js     long-lived sessionful workers (agent.start / steer)
   src/runModel.js         shared run-model assembly (HTML + ASCII viewers)
   src/asciiMap.js         ASCII map renderer
   src/runSummary.js       run-summary computation + text/markdown renderers
   test/                   offline + view-run + view-run.live + map-run + summarize-run +
                           goal-lint.plan + handshake
 references/               authoring.md (DSL + patterns) · runner-readme.md (internals)
-examples/                 hello · review · bug-hunt · review-gates · deep-research ·
-                          market-news · tournament-sort · triage · classify-route · demo/
+examples/                 one-shot: hello · review · bug-hunt · review-gates ·
+                          deep-research · market-news · tournament-sort · triage · classify-route
+  sessionful workers      sessionful-workers · warm-context-interrogation · flaky-bug-perturbation ·
+   (agent.start/steer)    hedged-take-first-win · lead-following-research · stateful-dialogue · agent-foreman
+  demo/                   bundled sample run for the viewer
   harness-zoo/goal-lint/  GoalLint — harden a vague /goal into a precise, testable one
 docs/                     screenshots
 ```

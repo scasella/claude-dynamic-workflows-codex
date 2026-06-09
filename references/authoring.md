@@ -111,6 +111,146 @@ spent reaches total, further `agent()` calls throw. Use for dynamic depth:
 Run another script inline (one level only). `ref` is `{ scriptPath }`. Shares the
 concurrency cap and budget.
 
+## Sessionful workers (long-lived, steerable)
+
+`agent()` is one-shot: one Codex thread, one turn, done. A **session** keeps the
+thread open so you can run *follow-up turns on the same thread* — the worker keeps
+its context. This is the seam for orchestration loops: spawn several workers, wait
+for whichever is useful first, then **accept / steer / spawn / verify / stop**.
+
+The sessionful API hangs off `agent` (not new globals):
+
+### `agent.start(prompt, opts?) → Promise<AgentSession>`
+Starts a thread and begins the first turn, then returns a handle **without waiting
+for the turn to finish**. Same `opts` as `agent()` (`agentType`, `systemPrompt`,
+`model`, `effort`, `sandbox`, `cwd`, `personality`, `schema`, `timeoutMs`, `phase`,
+`label`, `isolation:'worktree'`). Effort resolves exactly like `agent()` (so under
+`--auto-effort` a worker in a `parallel([…])` fan-out gets `high`, a lone start gets
+`xhigh`). Holds a concurrency slot for the running turn — **a detached running
+worker counts against the cap** until its turn settles.
+
+### `agent.waitAny(sessions, opts?) → Promise<{ session, index, snapshot, pendingSessions, timedOut }>`
+The main-thread primitive: resolves when the **first** session becomes *actionable*
+(completed / interrupted / failed / cancelled), or when `opts.timeoutMs` elapses
+(`timedOut:true`, `session:null`). `pendingSessions` lists the workers still running.
+Already-finished sessions return immediately (lowest index first). This is "notify
+me when any child worker finishes or needs attention."
+
+### `AgentSession`
+| member | meaning |
+| --- | --- |
+| `id` `label` `phase` `threadId` `currentTurnId` `status` | identity + live state (`status`: `starting`→`running`→`completed`/`interrupted`/`failed`/`cancelled`/`closed`) |
+| `wait(opts?) → Promise<snapshot>` | await the current turn. `opts.timeoutMs` returns a `timed_out` snapshot **without cancelling** the turn (it keeps running) |
+| `poll() → snapshot` | latest snapshot, synchronously (no waiting) |
+| `steer(message, opts?) → Promise<snapshot>` | **a follow-up `turn/start` on the SAME thread** — the worker continues with its context. Per-turn overrides: `schema`, `effort`, `timeoutMs`, `label`. Thread-level settings (`cwd`, `sandbox`, instructions) are fixed at start and can't change. `{wait:false}` returns the running snapshot; default `{wait:true}` awaits it. Throws if a turn is already running (`wait()`/`cancel()` first) or the session is closed |
+| `cancel() → Promise<snapshot>` | interrupt the active turn (`turn/interrupt`); returns a `cancelled` snapshot |
+| `close() → Promise<void>` | cancel any active turn, remove the worktree (if `isolation`), mark closed |
+
+`AgentSessionSnapshot`: `{ id, label, phase, threadId, turnId, status, result,
+text, error, model, effort, tokens, ms }` — `result` is the parsed object (with
+`schema`) or string; `tokens`/`ms` are **per-turn**.
+
+```js
+const a = await agent.start("Explore auth middleware. file:line findings only.", { label: "auth", sandbox: "read-only" })
+const b = await agent.start("Explore route handlers. Missing auth checks only.",  { label: "routes", sandbox: "read-only" })
+
+const first = await agent.waitAny([a, b], { timeoutMs: 180_000 })
+if (first.snapshot?.status === "completed") {
+  await first.session.steer("Narrow to the two highest-risk findings; list exact files to inspect next.", { wait: true })
+}
+const [finalA, finalB] = [await a.wait(), await b.wait()]
+await a.close(); await b.close()
+```
+
+### The controller pattern (who decides?)
+
+Don't make the human babysit workers. Split the decision rights:
+
+- **Script** decides *mechanical/structural* actions — schema failed, timeout, round
+  cap, budget cap, repeated nulls.
+- **Controller agent** decides *semantic* steering — accept / steer / spawn / verify
+  / stop / ask_human — from a worker's snapshot.
+- **Human** decides *policy* — scope, cost, risk, destructive edits, value calls, or
+  continuing past a budget/iteration cap.
+
+```js
+const decision = await agent(
+  `You are the controller. Goal:\n${goal}\nPolicy:\n${JSON.stringify(policy)}\n` +
+  `Latest worker snapshot:\n${JSON.stringify(first.snapshot)}\n` +
+  `Decide: accept if done · steer if the same worker needs a focused correction · ` +
+  `verify if an important claim is unchecked · ask_human only for scope/cost/risk/value · stop if low-value.`,
+  { label: "controller", phase: "Control", schema: DECISION_SCHEMA },
+)
+if (decision.action === "steer") await target.session.steer(decision.steerMessage, { wait: true })
+```
+
+`examples/sessionful-workers.workflow.js` is the runnable intro (start → waitAny →
+controller → steer → wait), and runs under `--plan`. Six more demos, one per
+new-capability shape (all `--plan`-safe):
+- `warm-context-interrogation` — *load once, ask many*: ingest a corpus once, then
+  `steer` a stream of follow-ups on warm context.
+- `flaky-bug-perturbation` — hold a reproduced failure (worktree) and `steer` through
+  a perturbation playbook without rebuilding it.
+- `hedged-take-first-win` — race N strategies, accept the first good one, `cancel` the
+  rest (`waitAny` + `cancel`).
+- `lead-following-research` — a controller `steer`s / `spawn`s / stops mid-run, chasing
+  the strongest lead on warm context.
+- `stateful-dialogue` — two long-lived agents with full memory, judged by a fresh cold
+  agent (illustrates session vs. one-shot).
+- `agent-foreman` — supervised autonomy: a foreman drives a live fleet and escalates
+  only at declared forks (`needs_human`).
+
+### Human interaction model
+
+The human sets **mission + policy**; the script owns the loop; the controller steers;
+the human re-enters only at declared checkpoints. Declare an **involvement mode**:
+
+- `hands_off` — never pause; safe defaults, mark uncertainty, avoid risky/destructive
+  actions.
+- `checkpointed` — **the recommended default.** Pause only at plan / write / budget /
+  scope gates.
+- `interactive` — live steering through a viewer/sidecar. *Future* — not built in v1.
+
+v1 does **not** block on live human input. When a decision genuinely needs a human,
+return a structured **checkpoint** and let the human resume:
+
+```js
+return {
+  status: "needs_human",
+  checkpointId: "scope-admin-routes",
+  question: "Should this audit include internal admin-only routes?",
+  choices: ["include", "exclude", "separate_section"],
+  recommendedDefault: "separate_section",
+  reason: "Workers disagree on whether admin-only endpoints are in scope.",
+  ledger,
+  resumeInstructions:
+    "Rerun with --resume and --args '{\"checkpointAnswers\":{\"scope-admin-routes\":\"separate_section\"}}'",
+}
+```
+
+The runtime doesn't interpret this object — it's an authoring convention. The CLI
+prints the workflow's return value, so the human sees the question and resume hint.
+
+### Limits & resume (read this)
+
+- **Live-only / non-resumable.** `agent()` stays resumable as before. Sessions are
+  **not**: there's no live Codex thread to revive across a process exit, so a
+  `--resume` run **re-runs** any sessions live (real tokens). Session turns *are*
+  journaled (under a `sess:<id>#<turn>` key) for the viewer/summary, but that key is
+  never served from the resume cache — **no fake thread resurrection.** Workflows
+  that need to pause for a human should checkpoint-by-return (above), not rely on
+  resuming a live session.
+- **One active turn per session.** `steer()` while a turn runs throws — `wait()` or
+  `cancel()` first. (v1 doesn't queue turns.)
+- **Finalization.** Sessions you leave open are closed automatically when the
+  workflow returns or throws (active turns cancelled, worktrees cleaned). Closing
+  explicitly is still good form.
+- **Worktrees** (`isolation:'worktree'`) are created once and **persist across every
+  steer**, removed only on `close()`/finalization.
+- **No interactive "needs input" state.** Workers run `approvalPolicy:"never"`, so
+  there's no mid-turn human-input request to surface; "actionable" means the turn
+  ended.
+
 ## Standard quality patterns
 
 These are why a workflow beats "more agents" — encode the pattern in code.
