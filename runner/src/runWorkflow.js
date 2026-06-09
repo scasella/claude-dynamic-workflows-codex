@@ -85,7 +85,13 @@ export async function runWorkflowSource(src, options = {}) {
 
   // Wrap so top-level await + return work; result is a host-awaitable promise.
   const script = new vm.Script(`(async () => {\n${body}\n})()`, { filename: "workflow.js" });
-  return script.runInContext(context);
+  try {
+    return await script.runInContext(context);
+  } finally {
+    // Close any sessionful workers the script left open — cancels their active turn
+    // and removes any worktrees — whether the workflow returned or threw.
+    try { await runtime.finalize?.(); } catch {}
+  }
 }
 
 // console inside the sandbox routes to the runner's log (stderr), so it can't

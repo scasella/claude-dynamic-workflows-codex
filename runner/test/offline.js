@@ -5,10 +5,11 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, writeFile, readFile, rm, stat, utimes } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractMeta, runWorkflowSource } from "../src/runWorkflow.js";
-import { effortForLayerWidth, schemaSkeleton } from "../src/runtime.js";
+import { effortForLayerWidth, schemaSkeleton, createRuntime, __activeSlots } from "../src/runtime.js";
 import { isGitRepo, createWorktree } from "../src/worktree.js";
 import { identityHash, Journal } from "../src/journal.js";
 import { liveState, buildRunModel, locateRun, listJournals } from "../src/runModel.js";
@@ -521,6 +522,336 @@ const exec = promisify(execFile);
   const loc2 = locateRun({ target: dir, journal: older });
   assert.ok(loc2.journalPath.endsWith("aaa.workflow.jsonl"), "--journal overrides the mtime default");
   await rm(dir, { recursive: true, force: true });
+}
+
+// ── Sessionful workers (agent.start / agent.waitAny / session.*) ─────────────
+// A fake session driver stands in for codexSession.startCodexSession via the
+// `startSession` seam, so these run with NO app-server and NO tokens. Each turn
+// "completes" after a small delay parsed from the prompt (delay=NN ms), or is
+// interrupted on demand — enough to exercise start/wait/waitAny/steer/cancel/close.
+function makeFakeSessionFactory() {
+  const drivers = [];
+  let seq = 0;
+  async function startSession(opts) {
+    const threadId = `fake-thread-${++seq}`;
+    const driver = {
+      threadId, opts, turns: [], cleaned: 0, _active: false, _done: null,
+      async beginTurn(prompt, turnOpts) {
+        this.turns.push(String(prompt));
+        const turnId = `${threadId}:t${this.turns.length}`;
+        const ms = Number((String(prompt).match(/delay=(\d+)/) || [])[1] ?? 2);
+        this._active = true;
+        let settle;
+        const completion = new Promise((res) => { settle = res; });
+        let timer;
+        const done = (status) => {
+          if (!this._active) return;
+          this._active = false;
+          this._done = null;
+          if (timer) clearTimeout(timer);
+          const text = `echo:${prompt}`;
+          settle({
+            status,
+            result: status === "completed" ? (turnOpts.schema ? { echoed: String(prompt) } : text) : null,
+            text,
+            error: status === "failed" ? "boom" : null,
+            model: "fake-model", tokens: 7, ms, turnId,
+          });
+        };
+        this._done = done;
+        timer = setTimeout(() => done("completed"), ms);
+        return { turnId, completion };
+      },
+      async interruptCurrent() { this._done?.("interrupted"); },
+      async cleanup() { this.cleaned++; },
+    };
+    drivers.push(driver);
+    return driver;
+  }
+  return { startSession, drivers };
+}
+
+// 26) agent.start() returns BEFORE the turn completes; wait() resolves completed.
+{
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sess1" };',
+    'const s = await agent.start("worker delay=40", { label: "w" });',
+    'const early = s.poll();',
+    'const fin = await s.wait();',
+    'return { early: early.status, threadId: s.threadId, fin: fin.status, result: fin.result, turnId: fin.turnId };',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.equal(r.early, "running", "agent.start returns while the turn is still running");
+  assert.ok(r.threadId && r.threadId.startsWith("fake-thread-"), "session exposes the thread id");
+  assert.equal(r.fin, "completed", "wait() resolves to a completed snapshot");
+  assert.equal(r.result, "echo:worker delay=40", "completed snapshot carries the result");
+  assert.ok(r.turnId, "snapshot carries the turn id");
+}
+
+// 27) agent.waitAny returns the first finisher and lists the still-running ones.
+{
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sess2" };',
+    'const a = await agent.start("A delay=80", { label: "a" });',
+    'const b = await agent.start("B delay=3", { label: "b" });',
+    'const first = await agent.waitAny([a, b]);',
+    'const finalA = await a.wait();',
+    // join the pending labels into a string: the array is built in the vm realm, so
+    // deepEqual against a host array would fail on prototype identity (test artifact).
+    'return { winner: first.snapshot.label, index: first.index, pending: first.pendingSessions.map((s) => s.label).join(","), pendingCount: first.pendingSessions.length, timedOut: first.timedOut, finalA: finalA.status };',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.equal(r.winner, "b", "waitAny returns the first session to finish");
+  assert.equal(r.index, 1, "winning index reported");
+  assert.equal(r.pendingCount, 1, "exactly one session is still pending");
+  assert.equal(r.pending, "a", "the still-running session is reported as pending");
+  assert.equal(r.timedOut, false);
+  assert.equal(r.finalA, "completed", "the slower session can still be awaited afterwards");
+}
+
+// 28) agent.waitAny times out cleanly without cancelling the running turn.
+{
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sess2b" };',
+    'const a = await agent.start("A delay=10000", { label: "a" });',
+    'const first = await agent.waitAny([a], { timeoutMs: 20 });',
+    'await a.cancel();',
+    'return { timedOut: first.timedOut, session: first.session, pending: first.pendingSessions.map((s) => s.label).join(","), pendingCount: first.pendingSessions.length };',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.equal(r.timedOut, true, "waitAny reports a timeout when nothing finishes in time");
+  assert.equal(r.session, null, "no winner on timeout");
+  assert.equal(r.pendingCount, 1, "the still-running session remains pending after the timeout");
+  assert.equal(r.pending, "a");
+}
+
+// 29) session.steer() starts a 2nd turn on the SAME thread (not a fresh agent).
+{
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sess3" };',
+    'const s = await agent.start("first", { label: "w" });',
+    'await s.wait();',
+    'const before = s.threadId;',
+    'const snap = await s.steer("second");',
+    'return { same: s.threadId === before, status: snap.status, result: snap.result };',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.equal(r.same, true, "steer continues on the SAME thread id");
+  assert.equal(r.status, "completed");
+  assert.equal(r.result, "echo:second", "steer's result reflects the follow-up prompt");
+  assert.equal(fake.drivers.length, 1, "exactly one thread/session was created (no fresh agent)");
+  assert.deepEqual(fake.drivers[0].turns, ["first", "second"], "both turns ran on the one thread");
+}
+
+// 30) steer() while a turn is running throws a clear, actionable error.
+{
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sess4" };',
+    'const s = await agent.start("slow delay=80", { label: "w" });',
+    'let err = null;',
+    'try { await s.steer("nope"); } catch (e) { err = e.message; }',
+    'await s.wait();',
+    'return { err };',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.match(r.err || "", /while a turn is already running/, "steer during a running turn throws a clear error");
+}
+
+// 31) session.cancel() interrupts the active turn and yields a cancelled snapshot.
+{
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sess5" };',
+    'const s = await agent.start("slow delay=10000", { label: "w" });',
+    'const snap = await s.cancel();',
+    'return { snap: snap.status, session: s.status };',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.equal(r.snap, "cancelled", "cancel() returns a cancelled snapshot");
+  assert.equal(r.session, "cancelled", "session status is cancelled after cancel()");
+}
+
+// 32) --plan handles start/wait/steer/waitAny WITHOUT calling the session driver.
+{
+  const recs = [];
+  let called = false;
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sessplan" };',
+    'phase("Explore");',
+    'const a = await agent.start("x", { label: "a", schema: { type: "object", properties: { items: { type: "array" } } } });',
+    'const snap = await a.wait();',
+    'const b = await agent.start("y", { label: "b" });',
+    'const first = await agent.waitAny([a, b]);',
+    'await a.steer("more");',
+    'return { items: snap.result.items.length, winner: first.snapshot.label, status: snap.status };',
+  ].join("\n"), {
+    plan: true, autoEffort: true,
+    onAgentPlan: (x) => recs.push(x),
+    startSession: () => { called = true; throw new Error("startSession must not run in --plan"); },
+  });
+  assert.equal(called, false, "--plan never calls the session driver (no Codex, no tokens)");
+  assert.equal(recs.filter((x) => x.kind === "session-start").length, 2, "two planned session starts are counted");
+  assert.equal(recs.filter((x) => x.kind === "steer").length, 1, "one planned steer is counted");
+  assert.equal(recs[0].phase, "Explore", "a planned session carries the phase");
+  assert.equal(recs[0].effort, "xhigh", "a lone planned session start under --auto-effort -> xhigh");
+  assert.equal(r.items, 0, "schema-skeleton arrays are empty in --plan");
+  assert.equal(r.winner, "a", "waitAny returns the first planned session");
+  assert.equal(r.status, "completed", "planned wait returns a completed skeleton snapshot");
+}
+
+// 33) session turns emit start/end lifecycle events carrying label/phase/metrics.
+{
+  const events = [];
+  const fake = makeFakeSessionFactory();
+  await runWorkflowSource([
+    'export const meta = { name: "sessev" };',
+    'phase("Explore");',
+    'const s = await agent.start("go", { label: "worker" });',
+    'await s.wait();',
+    'await s.steer("again");',
+    'return 1;',
+  ].join("\n"), { startSession: fake.startSession, onEvent: (e) => events.push(e) });
+  const starts = events.filter((e) => e.type === "start");
+  const ends = events.filter((e) => e.type === "end");
+  assert.equal(starts.length, 2, "one start per session turn (initial + steer)");
+  assert.equal(ends.length, 2, "one end per session turn (keeps liveState balanced)");
+  assert.equal(starts[0].kind, "session", "session turns are tagged kind:session");
+  assert.equal(starts[0].label, "worker");
+  assert.equal(starts[0].phase, "Explore", "start carries the phase");
+  assert.equal(ends[0].status, "completed", "end carries the turn status");
+  assert.equal(ends[0].tokens, 7, "end carries per-turn tokens");
+  assert.equal(ends[0].ms, 2, "end carries per-turn wall time");
+  assert.equal(ends[0].sessionId, starts[0].sessionId, "start/end share the sessionId");
+  assert.equal(starts[1].turn, 1, "the steer is turn index 1");
+}
+
+// 34) session turns are journaled for observability but live-only: their key is in
+//     the `sess:` namespace that agent() never generates, so resume can't serve them.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-sessj-"));
+  const jpath = join(dir, "s.jsonl");
+  const j = new Journal(jpath, { reuse: true });
+  await j.load();
+  const fake = makeFakeSessionFactory();
+  await runWorkflowSource([
+    'export const meta = { name: "sessj" };',
+    'phase("Explore");',
+    'const s = await agent.start("go", { label: "worker" });',
+    'await s.wait();',
+    'return 1;',
+  ].join("\n"), { startSession: fake.startSession, journal: j });
+  const lines = (await readFile(jpath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, 1, "the session turn was journaled for the viewer/summary");
+  assert.ok(lines[0].key.startsWith("sess:"), "session journal key is in the sess: namespace");
+  assert.equal(lines[0].session, true, "entry is flagged session:true");
+  assert.equal(lines[0].label, "worker");
+  assert.equal(lines[0].phase, "Explore");
+  assert.equal(lines[0].tokens, 7);
+  const agentKey = j.nextKey("go", { model: null });
+  assert.ok(!agentKey.startsWith("sess:"), "agent() keys are NEVER in the sess: namespace (no fake resurrection)");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 35) runtime finalization closes sessions the workflow left open (cancel + cleanup).
+{
+  const fake = makeFakeSessionFactory();
+  const result = await runWorkflowSource([
+    'export const meta = { name: "sessfin" };',
+    'const s = await agent.start("go delay=10000", { label: "leak" });',
+    'return s;',
+  ].join("\n"), { startSession: fake.startSession });
+  assert.equal(result.status, "closed", "runtime finalization closed the open session");
+  assert.equal(fake.drivers[0].cleaned, 1, "finalization cleaned up the driver");
+  assert.equal(fake.drivers[0]._active, false, "finalization interrupted the still-running turn");
+}
+
+// 36) worktree isolation: a session's worktree persists across the steer and is
+//     cleaned up exactly once, on close (not after the first turn).
+{
+  const repo = await mkdtemp(join(tmpdir(), "wf-sesswt-"));
+  await exec("git", ["init", "-q"], { cwd: repo });
+  await exec("git", ["config", "user.email", "t@t.t"], { cwd: repo });
+  await exec("git", ["config", "user.name", "t"], { cwd: repo });
+  await writeFile(join(repo, "f.txt"), "hi\n");
+  await exec("git", ["add", "-A"], { cwd: repo });
+  await exec("git", ["commit", "-qm", "init"], { cwd: repo });
+
+  const captured = {};
+  async function startSessionWT() {
+    const wt = await createWorktree(repo);
+    const existsAtTurn = [];
+    const driver = {
+      threadId: "wt-thread", dir: wt.dir, existsAtTurn, cleaned: 0, _active: false,
+      async beginTurn(prompt) {
+        existsAtTurn.push(existsSync(wt.dir)); // worktree must exist during every turn
+        this._active = true;
+        const turnId = "t" + existsAtTurn.length;
+        const completion = new Promise((res) =>
+          setTimeout(() => { this._active = false; res({ status: "completed", result: "ok", text: "ok", error: null, model: "fake", tokens: 1, ms: 1, turnId }); }, 2));
+        return { turnId, completion };
+      },
+      async interruptCurrent() {},
+      async cleanup() { this.cleaned++; await wt.cleanup(); },
+    };
+    captured.driver = driver;
+    return driver;
+  }
+  await runWorkflowSource([
+    'export const meta = { name: "sesswt" };',
+    'const s = await agent.start("a", { isolation: "worktree" });',
+    'await s.wait();',
+    'await s.steer("b");',
+    'await s.close();',
+    'return 1;',
+  ].join("\n"), { startSession: startSessionWT });
+  assert.deepEqual(captured.driver.existsAtTurn, [true, true], "worktree persists across the initial turn AND the steer");
+  assert.equal(captured.driver.cleaned, 1, "worktree cleaned exactly once");
+  assert.equal(existsSync(captured.driver.dir), false, "worktree removed on close");
+  await rm(repo, { recursive: true, force: true });
+}
+
+// 37) a detached running session turn occupies a concurrency slot until it settles.
+{
+  const fake = makeFakeSessionFactory();
+  const rt = createRuntime({ startSession: fake.startSession });
+  const before = __activeSlots();
+  const s = await rt.agent.start("hold delay=200", { label: "h" });
+  const during = __activeSlots();
+  const snap = await s.wait();
+  const after = __activeSlots();
+  assert.equal(during, before + 1, "a detached running session holds a concurrency slot");
+  assert.equal(snap.status, "completed");
+  assert.equal(after, before, "the slot is released when the turn finishes");
+  await rt.finalize();
+}
+
+// 38) agent.start enforces the budget exactly like agent() (BUDGET_EXCEEDED).
+{
+  resetMeter();
+  recordTokenUsage({ threadId: "pre", tokenUsage: { total: { inputTokens: 1000, outputTokens: 0, reasoningOutputTokens: 0 } } });
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sessbud" };',
+    'try { await agent.start("x", { label: "a" }); return "started"; }',
+    'catch (e) { return e.code || e.message; }',
+  ].join("\n"), { budgetTotal: 500, startSession: fake.startSession });
+  assert.equal(r, "BUDGET_EXCEEDED", "agent.start gates on the budget before starting a turn");
+  assert.equal(fake.drivers.length, 0, "no thread/session is created once the budget is exhausted");
+  resetMeter();
+}
+
+// 39) backward compat: classic agent() and sessionful agent.start coexist.
+{
+  const echo = async () => "one-shot";
+  const fake = makeFakeSessionFactory();
+  const r = await runWorkflowSource([
+    'export const meta = { name: "sessmix" };',
+    'const a = await agent("classic");',
+    'const s = await agent.start("session", { label: "w" });',
+    'const snap = await s.wait();',
+    'return { a, s: snap.result };',
+  ].join("\n"), { runAgent: echo, startSession: fake.startSession });
+  assert.equal(r.a, "one-shot", "classic agent() is unchanged alongside sessions");
+  assert.equal(r.s, "echo:session", "agent.start works in the same workflow");
 }
 
 console.log("offline checks passed ✓");

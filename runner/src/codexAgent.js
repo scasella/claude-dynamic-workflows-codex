@@ -46,7 +46,7 @@ export function strictifySchema(s) {
 let clientPromise; // lazily-connected, self-healing singleton
 let availableModels = []; // ids exposed by model/list, refreshed on each connect
 
-const SANDBOX_MAP = {
+export const SANDBOX_MAP = {
   "read-only": "read-only",
   readOnly: "read-only",
   "workspace-write": "workspace-write",
@@ -87,6 +87,75 @@ export async function shutdownClient() {
   clientPromise = undefined;
   availableModels = [];
   if (client) await client.shutdown();
+}
+
+// The model ids exposed by the most recent connect's model/list. Read by the
+// session module (codexSession.js) so the one-shot and sessionful paths resolve
+// models identically without each owning a client singleton.
+export function getAvailableModels() {
+  return availableModels;
+}
+
+// ── shared turn primitives ───────────────────────────────────────────────────
+// Used by the one-shot path below AND by codexSession.js (sessionful workers), so
+// both build threads/turns, collect streamed output, and parse schemas identically.
+
+// Thread-level settings (sandbox, cwd, developer instructions, personality) are
+// fixed for the life of the thread — a follow-up turn cannot change them.
+export function buildThreadParams({ sandbox, cwd, model, systemPrompt, personality }) {
+  const params = {
+    approvalPolicy: "never",
+    sandbox: SANDBOX_MAP[sandbox] ?? "workspace-write",
+    cwd,
+  };
+  if (model) params.model = model;
+  if (systemPrompt) params.developerInstructions = systemPrompt;
+  if (personality) params.personality = personality;
+  return params;
+}
+
+// Per-turn settings (effort, outputSchema) may differ between turns on one thread.
+export function buildTurnParams({ threadId, prompt, model, effort, schema }) {
+  const params = { threadId, input: [{ type: "text", text: String(prompt) }] };
+  if (model) params.model = model;
+  if (effort) params.effort = effort;
+  if (schema) params.outputSchema = strictifySchema(schema);
+  return params;
+}
+
+// Accumulate a turn's agent-message text for one thread (streaming deltas + the
+// authoritative item/completed text), surfacing partials via onProgress. Returns
+// { text(), detach() }; the caller MUST detach() once the turn settles.
+export function attachAgentMessageCollector(client, threadId, onProgress) {
+  let finalText = "";
+  const deltas = new Map();
+  const onNote = (n) => {
+    const p = n.params ?? {};
+    if (p.threadId !== threadId) return;
+    if (n.method === "item/agentMessage/delta" && typeof p.delta === "string") {
+      deltas.set(p.itemId, (deltas.get(p.itemId) ?? "") + p.delta);
+      // best-effort partial output for live viewers — must never break the turn.
+      if (onProgress) { try { onProgress([...deltas.values()].join("")); } catch {} }
+    } else if (n.method === "item/completed" && p.item?.type === "agentMessage") {
+      finalText = p.item.text ?? finalText;
+    }
+  };
+  client.on("notification", onNote);
+  return {
+    text: () => finalText || (deltas.size ? [...deltas.values()].join("") : ""),
+    detach: () => client.off("notification", onNote),
+  };
+}
+
+// Parse a turn's final text under an optional schema: strict JSON.parse, then a
+// tolerant fenced-JSON fallback. Without a schema the raw text passes through.
+export function parseSchemaResult(text, schema) {
+  if (!schema) return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return extractJson(text);
+  }
 }
 
 /**
@@ -148,40 +217,20 @@ async function runOneTurn(prompt, opts) {
   const client = await getClient(opts.clientOptions); // live (reconnects if needed)
   const model = resolveModel(opts.requestedModel, availableModels, log);
 
-  const threadParams = {
-    approvalPolicy: "never",
-    sandbox: SANDBOX_MAP[opts.sandbox] ?? "workspace-write",
+  const threadParams = buildThreadParams({
+    sandbox: opts.sandbox,
     cwd: opts.cwd,
-  };
-  if (model) threadParams.model = model;
-  if (opts.systemPrompt) threadParams.developerInstructions = opts.systemPrompt;
-  if (opts.personality) threadParams.personality = opts.personality;
-
+    model,
+    systemPrompt: opts.systemPrompt,
+    personality: opts.personality,
+  });
   const startThreadRes = await client.startThread(threadParams);
   const threadId = startThreadRes?.thread?.id;
   if (!threadId) throw new Error("thread/start did not return thread.id");
 
-  const turnParams = { threadId, input: [{ type: "text", text: String(prompt) }] };
-  if (model) turnParams.model = model;
-  if (opts.effort) turnParams.effort = opts.effort;
-  if (opts.schema) turnParams.outputSchema = strictifySchema(opts.schema);
+  const turnParams = buildTurnParams({ threadId, prompt, model, effort: opts.effort, schema: opts.schema });
 
-  let finalText = "";
-  const deltas = new Map();
-  const onNote = (n) => {
-    const p = n.params ?? {};
-    if (p.threadId !== threadId) return;
-    if (n.method === "item/agentMessage/delta" && typeof p.delta === "string") {
-      deltas.set(p.itemId, (deltas.get(p.itemId) ?? "") + p.delta);
-      // surface the partial output so a live viewer can show progress while the
-      // agent is still writing. Best-effort — must never break the turn.
-      if (opts.onProgress) { try { opts.onProgress([...deltas.values()].join("")); } catch {} }
-    } else if (n.method === "item/completed" && p.item?.type === "agentMessage") {
-      finalText = p.item.text ?? finalText;
-    }
-  };
-  client.on("notification", onNote);
-
+  const collector = attachAgentMessageCollector(client, threadId, opts.onProgress);
   try {
     const startTurnRes = await client.startTurn(turnParams);
     const turnId = startTurnRes?.turn?.id;
@@ -212,17 +261,9 @@ async function runOneTurn(prompt, opts) {
       tokens: tokensForThread(threadId),
     });
 
-    const text = finalText || (deltas.size ? [...deltas.values()].join("") : "");
-    if (opts.schema) {
-      try {
-        return JSON.parse(text);
-      } catch {
-        return extractJson(text);
-      }
-    }
-    return text;
+    return parseSchemaResult(collector.text(), opts.schema);
   } finally {
-    client.off("notification", onNote);
+    collector.detach();
   }
 }
 
