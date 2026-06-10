@@ -149,9 +149,14 @@ phase('Gate')
 const go = await human("Ship the fix?", { id: "go", choices: ["yes", "no"], default: "no", timeoutMs: 30000 })
 return { go }
 `);
-  const child = spawn("node", [RUN, "gate.workflow.js", "--run-id", "alpha", "--interactive", "--no-summary"], {
-    cwd: gdir, stdio: ["ignore", "pipe", "pipe"],
-  });
+  const notifyLog = join(ROOT, "notify.log");
+  const child = spawn(
+    "node",
+    [RUN, "gate.workflow.js", "--run-id", "alpha", "--no-summary",
+      // --notify-cmd implies --interactive; the event JSON arrives via $WORKFLOW_EVENT
+      "--notify-cmd", `printf '%s\\n' "$WORKFLOW_EVENT" >> '${notifyLog}'`],
+    { cwd: gdir, stdio: ["ignore", "pipe", "pipe"] },
+  );
   let out = "", err = "";
   child.stdout.on("data", (c) => (out += c));
   child.stderr.on("data", (c) => (err += c));
@@ -166,6 +171,17 @@ return { go }
     try { pending = JSON.parse(readFileSync(qPath, "utf8")).filter((q) => !q.answered); } catch {}
   }
   assert.equal(pending.length, 1, `the gate should be pending (stderr so far: ${err})`);
+
+  // the out-of-band notifier fired for the pending gate (detached shell hook)
+  let notified = [];
+  for (let i = 0; i < 50 && !notified.length; i++) {
+    await sleep(100);
+    try { notified = readFileSync(notifyLog, "utf8").trim().split("\n").map((l) => JSON.parse(l)); } catch {}
+  }
+  assert.equal(notified[0]?.event, "question", "--notify-cmd fired on the pending gate");
+  assert.equal(notified[0]?.id, "human:go#0");
+  assert.equal(notified[0]?.qid, "go");
+  assert.ok(notified[0]?.journal?.endsWith("gate.workflow--alpha.jsonl"), "the event carries the journal path to answer against");
 
   // the supervisor's poll: fleet status sees a live run waiting on an answer
   const st = spawnSync("node", [FLEET, "status", gdir, "--json"], { encoding: "utf8" });
@@ -189,6 +205,17 @@ return { go }
   const gate = jl.find((e) => e.key === "human:go#0");
   assert.equal(gate?.result, "yes");
   assert.equal(gate?.source, "live", "the answer was journaled as live-channel (replayable on --resume)");
+
+  // the notifier also fired on the run's end, with the terminal status
+  let endEvt = null;
+  for (let i = 0; i < 50 && !endEvt; i++) {
+    await sleep(100);
+    try {
+      const evs = readFileSync(notifyLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      endEvt = evs.find((e) => e.event === "end") ?? null;
+    } catch {}
+  }
+  assert.equal(endEvt?.status, "completed", "--notify-cmd fired on run end with the terminal status");
 
   // after exit: the same poll shows completed + the result
   const st2 = spawnSync("node", [FLEET, "status", gdir, "--json"], { encoding: "utf8" });

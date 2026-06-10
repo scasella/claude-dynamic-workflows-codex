@@ -42,6 +42,7 @@ function parseArgs(argv) {
     retries: null,
     journal: undefined,
     runId: null,
+    notifyCmd: null,
     resume: false,
     noJournal: false,
     fresh: false,
@@ -71,6 +72,7 @@ function parseArgs(argv) {
     else if (a === "--retries") out.retries = Number(rest[++i]);
     else if (a === "--journal") out.journal = rest[++i];
     else if (a === "--run-id") out.runId = rest[++i];
+    else if (a === "--notify-cmd") out.notifyCmd = rest[++i];
     else if (a === "--resume") out.resume = true;
     else if (a === "--no-journal") out.noJournal = true;
     else if (a === "--fresh") out.fresh = true;
@@ -102,6 +104,10 @@ if (opts.help || !opts.script) {
       "                   `fleet.js answer`, or by appending to <journal>.answers.jsonl\n" +
       "  --run-id NAME    suffix the default journal/sidecar paths with NAME so\n" +
       "                   concurrent runs of the same script don't collide (fleets)\n" +
+      "  --notify-cmd C   run shell command C (detached, best-effort) when a human()\n" +
+      "                   question goes pending and when the run ends; the event JSON\n" +
+      "                   is in $WORKFLOW_EVENT. Implies --interactive. e.g. macOS:\n" +
+      "                   --notify-cmd 'osascript -e \"display notification \\\"$WORKFLOW_EVENT\\\"\"'\n" +
       "  --frontier       pin ALL agents to the latest frontier model (auto-detected),\n" +
       "                   overriding any per-call model in the script\n" +
       "  --pin-model M    pin ALL agents to model M, overriding any per-call model\n" +
@@ -370,14 +376,32 @@ if (!opts.noJournal) {
   };
 }
 
+// ── out-of-band notifications (--notify-cmd) ──────────────────────────────────
+// A supervisor that isn't watching (a human away from the terminal, an agent
+// between polls) still needs to hear about the two moments that matter: a gate
+// going pending (it times out to its default!) and the run ending. The command
+// runs detached and best-effort — a notifier failure never touches the run.
+const notify = opts.notifyCmd
+  ? (evt) => {
+      try {
+        spawn("/bin/sh", ["-c", opts.notifyCmd], {
+          env: { ...process.env, WORKFLOW_EVENT: JSON.stringify(evt) },
+          stdio: "ignore",
+          detached: true,
+        }).unref();
+      } catch {}
+    }
+  : null;
+
 // ── interactive involvement channel (the workflow's `human()` global) ─────────
 // Questions go OUT via the questions sidecar (the live viewer renders an answer
 // card; `--gui` serves the viewer over localhost so the card can POST back).
 // Answers come IN via the answers jsonl — appended by the viewer's /answer
 // endpoint, or by hand:  echo '{"id":"<id>","answer":"yes"}' >> <…>.answers.jsonl
-// Auto-enabled by --gui/--tui (a monitor is attached); --interactive forces it on
-// for headless runs you plan to answer from another terminal.
-const interactive = (opts.interactive || opts.gui || opts.tui) && !!journalPath;
+// Auto-enabled by --gui/--tui (a monitor is attached) and by --notify-cmd (you
+// asked to be told about gates, so the answer channel must be open);
+// --interactive forces it on for headless runs answered from another terminal.
+const interactive = (opts.interactive || opts.gui || opts.tui || !!opts.notifyCmd) && !!journalPath;
 let humanChannel;
 if (interactive) {
   const questionsPath = questionsPathFor(journalPath);
@@ -399,7 +423,11 @@ if (interactive) {
     return out;
   };
   humanChannel = {
-    notify(q) { questions.push({ ...q, askedAt: Date.now(), answered: false }); flushQuestions(); },
+    notify(q) {
+      questions.push({ ...q, askedAt: Date.now(), answered: false });
+      flushQuestions();
+      notify?.({ event: "question", id: q.id, qid: q.qid, question: q.question, choices: q.choices ?? null, default: q.default ?? null, journal: resolve(journalPath), script: resolve(opts.script) });
+    },
     async wait(id, { timeoutMs = 600_000 } = {}) {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
@@ -435,6 +463,7 @@ if ((opts.tui || opts.gui) && journalPath) {
 const onPhase = (title) => console.error(`\n━━ ${title} ━━`);
 const onLog = (message) => console.error(message);
 
+let endStatus = "completed";
 try {
   const result = await runWorkflowFile(resolve(opts.script), {
     args: opts.args,
@@ -460,6 +489,7 @@ try {
     try { writeFileSync(resultPathFor(journalPath), JSON.stringify(result ?? null)); } catch {}
   }
 } catch (e) {
+  endStatus = e?.code === "BUDGET_EXCEEDED" ? "budget_exceeded" : "failed";
   if (e?.code === "BUDGET_EXCEEDED") {
     const higher = opts.budget ? opts.budget * 2 : 1_000_000;
     console.error(`\n💸 ${e.message}`);
@@ -470,6 +500,7 @@ try {
   }
   process.exitCode = 1;
 } finally {
+  notify?.({ event: "end", status: endStatus, journal: journalPath ? resolve(journalPath) : null, script: resolve(opts.script) });
   if (progressTimer) { try { clearInterval(progressTimer); } catch {} progressTimer = null; }
   await shutdownClient();
   if (guiChild) {

@@ -240,7 +240,10 @@ node …/run-workflow.js hunt.workflow.js --args '{"slice":"auth"}' --run-id aut
 ### 4 · Supervise — the loop
 
 Poll the fleet digest between other work (and promptly while gates may be
-pending — they time out to defaults):
+pending — they time out to defaults). For long unattended stretches, add
+`--notify-cmd` at launch so a pending gate *pushes* instead of waiting to be
+polled (e.g. append `$WORKFLOW_EVENT` to a file you watch, or a macOS
+`osascript` notification):
 
 ```bash
 node ~/.claude/skills/codex-workflows/runner/bin/fleet.js status <fleet-dir>   # --json to parse
@@ -657,6 +660,9 @@ run-workflow <script.js>
                    fleet.js answer (a supervising agent) or the answers sidecar
   --run-id NAME    suffix the default journal/sidecars so concurrent runs of the
                    SAME script don't collide (fleet mode)
+  --notify-cmd C   run shell command C (detached, best-effort; event JSON in
+                   $WORKFLOW_EVENT) when a gate goes pending / the run ends;
+                   implies --interactive
   --retries N      transient-error retries per agent (default 3)
   --resume         reuse prior results from the journal (skip unchanged agents)
   --journal PATH | --fresh | --no-journal

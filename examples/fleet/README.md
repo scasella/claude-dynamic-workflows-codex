@@ -71,6 +71,13 @@ node $RUNNER/bin/run-workflow.js hunt-deep-fork.workflow.js \
   --journal .workflow-journal/hunt-deep-fork.jsonl --resume --frontier --auto-effort --interactive
 ```
 
+Stepping away? Launch with `--notify-cmd` and a pending gate **pushes** to you
+instead of waiting to be polled (the event JSON arrives in `$WORKFLOW_EVENT`):
+
+```bash
+… --notify-cmd 'osascript -e "display notification \"workflow gate pending\" with title \"fleet\""'
+```
+
 Unanswered gates **never hang** the fleet: `hunt-deep` defaults to `stop`
 (don't spend unsupervised), `hunt-wide` to `all` (the thorough default). The
 supervisor's answers are journaled, so a `--resume` replays them instead of

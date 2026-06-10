@@ -339,6 +339,11 @@ loop. The pieces:
   `--list` shows a run's asked/pending questions. Free-text answers are how a
   supervisor **steers**: author workflows with checkpoint gates whose answers
   the script applies (e.g. `session.steer(directive)`).
+- **`--notify-cmd CMD`** (on `run-workflow`) — the push side: CMD runs detached
+  (best-effort, `/bin/sh -c`, the event JSON in `$WORKFLOW_EVENT`) when a
+  `human()` question goes pending — gates time out to their defaults, so an
+  away supervisor needs the push — and when the run ends
+  (`completed` / `budget_exceeded` / `failed`). Implies `--interactive`.
 - **Fork** — copy a journal to a new name, point an edited variant at it with
   `--journal <copy> --resume`: the unchanged prefix replays at 0 tokens and
   sessionful workers re-attach to their threads warm; only the new direction
