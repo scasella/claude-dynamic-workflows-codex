@@ -75,8 +75,13 @@ if (opts.list) {
 }
 if (opts.help || (!opts.target && !opts.journal)) {
   console.error(
-    "usage: view-run <run-dir | journal.jsonl> [--script PATH] [--journal PATH] [--out PATH] [--title TXT] [--open] [--list]\n" +
-      "  --list shows a run dir's journals (newest first) so you can pick one with --journal.",
+    "usage: view-run <run-dir | journal.jsonl> [--script PATH] [--journal PATH] [--out PATH] [--title TXT]\n" +
+      "                [--open] [--list] [--watch] [--serve] [--port N] [--settle]\n" +
+      "  --list    show a run dir's journals (newest first) so you can pick one with --journal\n" +
+      "  --watch   keep rebuilding as the run progresses (the page updates IN PLACE, no reload)\n" +
+      "  --serve   serve the live page over 127.0.0.1 so human() questions are answerable in it\n" +
+      "  --port N  port for --serve (default: an ephemeral free port)\n" +
+      "  --settle  write the final static render for a finished run and exit (used by the runner)",
   );
   process.exit(opts.help ? 0 : 1);
 }

@@ -61,8 +61,9 @@ The first thing you'll notice is what's *not* in the old one-shot model: **long-
 git clone https://github.com/scasella/claude-dynamic-workflows-codex ~/.claude/skills/codex-workflows
 ```
 
-(Developing from a clone elsewhere? `npm run sync-skill` pushes your working
-tree to `~/.claude/skills/codex-workflows` in one command.)
+(Developing from a clone elsewhere? `npm run sync-skill` pushes the skill
+surface — `SKILL.md`, `references/`, `examples/`, `runner/` — to
+`~/.claude/skills/codex-workflows` in one command.)
 
 **Prerequisites**
 
@@ -430,7 +431,8 @@ The runner and viewer work on their own — no Claude Code required.
 ```bash
 # Run a workflow script against Codex (pin the frontier model, auto-scale effort):
 node runner/bin/run-workflow.js examples/review.workflow.js --frontier --auto-effort \
-  --sandbox read-only --args '{"files":["src/auth.ts"],"focus":"missing auth checks"}'
+  --sandbox read-only --args '{"files":["runner/src/codexAgent.js"],"focus":"error handling"}'
+# (point --args files at your own paths — the one above is a real file in this repo)
 # progress streams on stderr; the workflow's return value prints as JSON on stdout
 
 # The flagship sessionful demo (race + steer + a human() cockpit gate), watched live:

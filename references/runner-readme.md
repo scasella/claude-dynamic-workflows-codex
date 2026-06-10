@@ -97,7 +97,7 @@ npm run handshake
 # run the example 2-agent workflow
 npm run example
 # or:
-node bin/run-workflow.js examples/hello.workflow.js
+node bin/run-workflow.js ../examples/hello.workflow.js
 
 # offline unit checks (no app-server)
 node test/offline.js

@@ -200,8 +200,11 @@ agent whose job is *reading a repo/corpus* costs **~400–600k tokens
 regardless of its effort tier** — the input dominates, so `--effort low`
 does not make a sweep cheap, and `--plan`'s per-effort estimate undercounts
 it (measured: four "low" sweeps = 2.1M, 525k each, vs a 150k/agent plan
-estimate). Budget ≈ `readers × 500k + non-readers × the plan estimate`,
-with headroom. A tripped ceiling is recoverable (`--resume` replays the
+estimate). At `xhigh` — which `--auto-effort` gives every sessionful worker's
+turns (width 1) — a reading turn runs **~1–1.5M** (measured: a walkthrough
+worker's first turn + one steer tripped a 2.5M ceiling). Budget ≈
+`readers × 500k + xhigh reading turns × 1.2M + non-readers × the plan
+estimate`, with headroom. A tripped ceiling is recoverable (`--resume` replays the
 prefix free) but costs a supervision round-trip. Apply the *Anti-overbuild
 rule* to the fleet too: 2 well-differentiated variants beat 4 redundant ones
 — every variant must bet on something the others don't.
@@ -726,8 +729,9 @@ run-workflow <script.js>
   script that tries to read files itself — have an `agent()` do it.
 - **Model mapping** — a script that requests `claude-opus-4-8` or a bare
   `opus`/`sonnet`/`haiku` is remapped to an available Codex model. Don't rely on
-  that: set the frontier model explicitly with `--model gpt-5.5` (see *Model*)
-  and keep it identical for every agent.
+  that: pin every agent with `--frontier` (or `--pin-model gpt-5.5`) — see
+  *Model*. (`--model` is only the *fallback* default; a per-call `model` in the
+  script overrides it, so it does NOT guarantee one model for every agent.)
 - **Determinism** — `Math.random()`, `Date.now()`, and argless `new Date()` are
   blocked inside scripts (they'd desync resume). Pass values via `args`.
 - **Per-turn timeout, and "failed" ≠ "did nothing"** — each `agent()` turn must

@@ -25,7 +25,8 @@ const MAP = {
 };
 
 const [cmd, ...rest] = process.argv.slice(2);
-if (!cmd || !MAP[cmd]) {
+const wantsHelp = (s) => s === "-h" || s === "--help" || s === "help";
+if (!cmd || wantsHelp(cmd) || !MAP[cmd] || (cmd === "doctor" && rest.some(wantsHelp))) {
   console.error(
     "usage: codex-workflows <command> [args]\n\n" +
       "  run <script.js> [flags]   execute a workflow against local Codex\n" +
@@ -33,10 +34,12 @@ if (!cmd || !MAP[cmd]) {
       "  view [target] […]         generate/open the HTML run viewer\n" +
       "  map [target] […]          render the ASCII execution map\n" +
       "  summarize [target] […]    cost/performance/reliability report\n" +
-      "  doctor                    check the local Codex App Server is ready\n\n" +
-      "Each command accepts its underlying CLI's flags (pass -h for them).",
+      "  doctor                    check the local Codex App Server is ready\n" +
+      "                            (takes no flags — it just runs the check)\n\n" +
+      "Each other command accepts its underlying CLI's flags (pass -h for them).",
   );
-  process.exit(cmd ? 1 : 0);
+  // help was asked for → success; an unknown command → error
+  process.exit(!cmd || wantsHelp(cmd) || (cmd === "doctor" && MAP[cmd]) ? 0 : 1);
 }
 
 const child = spawn(process.execPath, [join(RUNNER, MAP[cmd]), ...rest], { stdio: "inherit" });

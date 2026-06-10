@@ -36,3 +36,5 @@ jobs:
         run: node runner/test/serve.test.js
       - name: Fleet supervision (status / answer / supervisor loop)
         run: node runner/test/fleet.test.js
+      - name: Every bundled workflow is --plan-safe
+        run: node runner/test/examples.plan.test.js

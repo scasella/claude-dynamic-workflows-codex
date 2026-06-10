@@ -11,7 +11,7 @@
   "license": "MIT",
   "scripts": {
     "handshake": "node test/handshake.js",
-    "test": "node test/offline.js && node test/codex-session.test.js && node test/map-run.test.js && node test/view-run.test.js && node test/view-run.live.test.js && node test/summarize-run.test.js && node test/goal-lint.plan.test.js && node test/claim-check.plan.test.js && node test/serve.test.js && node test/fleet.test.js",
+    "test": "node test/offline.js && node test/codex-session.test.js && node test/map-run.test.js && node test/view-run.test.js && node test/view-run.live.test.js && node test/summarize-run.test.js && node test/goal-lint.plan.test.js && node test/claim-check.plan.test.js && node test/serve.test.js && node test/fleet.test.js && node test/examples.plan.test.js",
     "example": "node bin/run-workflow.js ../examples/hello.workflow.js --frontier"
   },
   "engines": {

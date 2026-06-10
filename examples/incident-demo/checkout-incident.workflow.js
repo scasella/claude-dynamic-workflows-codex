@@ -44,10 +44,16 @@ const leads = [
   ["hunt:pool", "Test the hypothesis that this is DB connection-pool exhaustion under load."],
   ["hunt:cache", "Test the hypothesis that this is a cache stampede after a TTL expiry."],
 ];
-const workers = [];
-for (const [label, prompt] of leads) {
-  workers.push(await agent.start(`${prompt}\n\nContext:\n${JSON.stringify({ metrics, logs, deploys })}`, { label, phase: "Hunt", ...RO }));
-}
+// Start the workers inside parallel() so --auto-effort sees the real layer
+// width (3 → `high`, the shape in the bundled journal); a plain loop starts
+// each at width 1 → `xhigh`, so the documented rerun wouldn't reproduce it.
+const workers = (
+  await parallel(
+    leads.map(([label, prompt]) => () =>
+      agent.start(`${prompt}\n\nContext:\n${JSON.stringify({ metrics, logs, deploys })}`, { label, phase: "Hunt", ...RO }),
+    ),
+  )
+).filter(Boolean);
 const winner = await agent.waitAny(workers);
 for (const s of winner.pendingSessions) await s.cancel(); // stop the losers
 
