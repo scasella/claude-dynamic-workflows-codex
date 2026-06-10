@@ -22,6 +22,7 @@ const MAP = {
   view: "bin/view-run.js",
   map: "bin/map-run.js",
   summarize: "bin/summarize-run.js",
+  compare: "bin/compare-runs.js",
   doctor: "test/handshake.js",
 };
 
@@ -35,7 +36,8 @@ if (!cmd || wantsHelp(cmd) || !MAP[cmd] || (cmd === "doctor" && rest.some(wantsH
       "  supervise -- <cmd> [args] wrap ANY command in the fleet protocol (gates via @@ASK)\n" +
       "  view [target] […]         generate/open the HTML run viewer\n" +
       "  map [target] […]          render the ASCII execution map\n" +
-      "  summarize [target] […]    cost/performance/reliability report\n" +
+      "  summarize [target] […]    cost/performance/reliability report (one run)\n" +
+      "  compare [dir …]           cost/reliability/trend across MANY runs\n" +
       "  doctor                    check the local Codex App Server is ready\n" +
       "                            (takes no flags — it just runs the check)\n\n" +
       "Each other command accepts its underlying CLI's flags (pass -h for them).",

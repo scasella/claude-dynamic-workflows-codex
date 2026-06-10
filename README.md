@@ -184,6 +184,7 @@ Rough intent is the default — a sentence or two is enough, and the skill compi
 - Claude renders the **execution map inline** as the run progresses and again when it lands — so you can follow it without leaving the conversation.
 - For the full browser GUI at any time, just ask Claude to **open the viewer** (it runs `view-run` on the run's journal).
 - For a **cost & reliability recap** — tokens by phase, the costliest/slowest agents, and any red flags — ask Claude to **summarize the run** (it runs `summarize-run` on the journal); a short version also prints automatically when a run finishes.
+- To see **across runs** — what each run cost, completion rates, and how the same workflow trends run-over-run — ask Claude to **compare the runs** (it runs `compare-runs` over the journals; one line per run plus per-workflow rollups like "avg 1.2M tok/run · latest vs prev: −20%").
 - Every run is journaled to `<project>/.workflow-journal/<name>.jsonl`; ask Claude to **open the last run in the viewer** to revisit a past run.
 - The script Claude wrote stays in your project — rerun or edit it directly, or ask Claude to adjust it.
 

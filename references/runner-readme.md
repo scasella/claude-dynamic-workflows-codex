@@ -266,6 +266,19 @@ What each source contributes (all optional except the journal):
 tiny runs, a small phase table otherwise); `--summary` prints the full report inline,
 `--no-summary` silences it.
 
+### Across-runs analytics (`bin/compare-runs.js`)
+
+`summarize-run` is one journal deep; `compare-runs [dir|journal …] [--json]`
+reads **many** (same discovery as `fleet status`: a dir contributes every
+journal under its `.workflow-journal/`). One line per run, newest first —
+agents (+ worker count), completion rate (cancelled-by-design race losers are
+**not** failures), cached replays, the run's own **executed** tokens (resume
+replays excluded when the event sidecar can tell), wall clock, and
+budget/null/warning flags — then **run-over-run rollups** for workflows that
+ran more than once: average cost, completion rate, and the latest-vs-previous
+token trend. `--run-id` variants of one script roll up under the same name.
+`src/compareRuns.js` is the pure logic; `test/compare-runs.test.js` covers it.
+
 ### Dry-run planning (`--plan`)
 
 `--plan` executes the orchestration with `agent()` stubbed — it returns a JSON

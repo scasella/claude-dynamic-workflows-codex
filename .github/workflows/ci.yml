@@ -38,5 +38,7 @@ jobs:
         run: node runner/test/fleet.test.js
       - name: Supervise shim (second fleet-protocol producer)
         run: node runner/test/supervise.test.js
+      - name: compare-runs (longitudinal analytics)
+        run: node runner/test/compare-runs.test.js
       - name: Every bundled workflow is --plan-safe
         run: node runner/test/examples.plan.test.js
