@@ -11,7 +11,7 @@ Thanks for your interest! This is a small, dependency-free project — easy to h
   - `bin/view-run.js` — the run-viewer generator (`--serve` adds the interactive cockpit endpoint).
   - `bin/fleet.js` — fleet supervision: `status` (multi-run digest) + `answer` (the human()/checkpoint channel; `src/fleetStatus.js` is the pure logic).
   - `test/` — `offline.js` (unit), `codex-session.test.js` (session driver + chaos), `view-run.test.js` / `view-run.live.test.js` / `map-run.test.js` / `summarize-run.test.js` (viewer + summary robustness across run shapes), `serve.test.js` (cockpit channel), `fleet.test.js` (fleet status/answer + the agent-supervisor loop), `goal-lint.plan.test.js` / `claim-check.plan.test.js` (harness-zoo dry runs), `examples.plan.test.js` (every bundled workflow stays `--plan`-safe), `handshake.js` (live Codex connectivity).
-- `references/` — `authoring.md` (workflow-script DSL) and `runner-readme.md` (architecture / Codex protocol mapping / faithfulness).
+- `references/` — `authoring.md` (workflow-script DSL), `runner-readme.md` (architecture / Codex protocol mapping / faithfulness), `fleet-protocol.md` (the sidecar contract that makes runs supervisable — implement it to add a new producer/consumer).
 - `examples/` — runnable templates and a bundled `demo/` run.
 - `bin/codex-workflows.js` — the npx/git-install dispatcher (`run` / `fleet` / `view` / `map` / `summarize` / `doctor`).
 - `scripts/sync-skill.js` — one-command sync of the skill surface to `~/.claude/skills/codex-workflows` (`npm run sync-skill`).

@@ -849,6 +849,9 @@ table. `run-workflow … --summary` prints the full report inline at the end.
 - `references/authoring.md` — full DSL + standard quality patterns.
 - `references/runner-readme.md` — architecture, the Codex protocol mapping,
   faithfulness vs. the native runtime, and limits.
+- `references/fleet-protocol.md` — the sidecar file contract behind fleet
+  supervision (states, questions/answers, notify), for supervising or
+  producing runs outside this runner.
 - `examples/` — runnable templates: `hello`, `review`, `bug-hunt` (loop-until-dry +
   majority refute-by-default), `review-gates` (fresh-context review gate),
   `deep-research`, `tournament-sort`, `triage`, `classify-route`.

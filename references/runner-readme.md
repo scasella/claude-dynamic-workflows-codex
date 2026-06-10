@@ -356,6 +356,12 @@ loop. The pieces:
 `examples/fleet/` is a runnable two-variant fleet with the full supervision
 transcript; the `/codex-workflows --multi` skill mode automates the whole loop.
 
+The whole supervision layer is a **file contract**, not a runner coupling —
+any long-running job that writes the sidecars is supervisable by the same
+tools. The contract (file formats, state machine, answer/steer rules, the
+minimum viable producer) is specified in
+[`fleet-protocol.md`](fleet-protocol.md).
+
 ### Cross-project robustness
 
 A persisted script written for Claude Code rarely needs editing to run here:
