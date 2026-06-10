@@ -1,6 +1,6 @@
 {
   "name": "claude-dynamic-workflows-codex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Run Claude Code's dynamic-workflow orchestration on a local Codex (GPT) backend, plus an interactive run viewer.",
