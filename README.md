@@ -247,7 +247,15 @@ With `--multi`, Claude stops being a launcher and becomes the **operator**. It c
 
 <sub>↑ the live fleet dashboard mid-supervision: the deep investigator is **waiting on a steer** (free text = a directive, with the paste-ready answer command right under it), the diff sweep is mid-verify, and log-forensics has already returned its verdict.</sub>
 
-You're never locked out of the loop: the same checkpoints stay human-answerable in the `--gui` cockpit, and `fleet status --watch --html fleet.html --open` gives you a **live fleet dashboard** (above) — one card per run, auto-refreshing, with paste-ready answer commands under every pending gate. The difference is you no longer *have* to be there. ([examples/fleet](examples/fleet) is the runnable two-variant version with the full transcript; the supervision layer itself is a documented **file contract** — [fleet-protocol.md](references/fleet-protocol.md) — so any long-running job that writes the sidecars becomes supervisable by the same tools.)
+You're never locked out of the loop: the same checkpoints stay human-answerable in the `--gui` cockpit, and `fleet status --watch --html fleet.html --open` gives you a **live fleet dashboard** (above) — one card per run, auto-refreshing, with paste-ready answer commands under every pending gate. The difference is you no longer *have* to be there. ([examples/fleet](examples/fleet) is the runnable two-variant version with the full transcript.)
+
+And the supervision layer isn't limited to workflows — it's a documented **file contract** ([fleet-protocol.md](references/fleet-protocol.md)), and the bundled `supervise` shim wraps **any long-running command** in it:
+
+```bash
+npx github:scasella/claude-dynamic-workflows-codex supervise --name nightly -- python run_evals.py
+```
+
+The job appears in `fleet status` and the dashboard like any run, its output streams as live progress, and a one-line `@@ASK {"question":"Promote?","choices":["yes","no"],"default":"no"}` printed by the job becomes a real supervisor gate — the answer lands on the job's stdin (`read answer` in bash), with the safe default on timeout. Your deploy script, eval run, or data job gets the same supervised-autonomy treatment as a workflow fleet.
 
 This isn't hypothetical — this repo dogfoods it. A `--multi` fleet was pointed at its own docs before this README shipped: two variants checked 90 documentation claims and walked the fresh-user install story, adversarially verified their own findings (8 flagged → 6 survived the refuters), and every confirmed issue was fixed — including one of them becoming a permanent CI suite.
 

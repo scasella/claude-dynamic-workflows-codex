@@ -195,3 +195,19 @@ supervisable, in order of value:
 
 Compatibility rule for everyone: **add fields, never repurpose them; treat a
 missing file as "feature absent", not an error.**
+
+## Reference producers
+
+Two ship in this repo, proving the contract from both ends of the spectrum:
+
+1. **`run-workflow`** — the full producer: every rung of the ladder, plus
+   resume identity and per-agent metrics.
+2. **`supervise`** (`runner/bin/supervise.js`) — the minimal one, ~180 lines
+   wrapping **any command**: `supervise --name nightly -- python evals.py`.
+   It writes meta/journal/result/events, streams the job's output into the
+   progress sidecar, and turns `@@ASK {json}` lines on the job's stdout into
+   gates — the answer (or the default, on timeout) arrives as one line on the
+   job's **stdin**, so a bash `read` is a complete gate client.
+   `runner/test/supervise.test.js` drives the whole loop — `fleet status` →
+   `fleet answer` → stdin delivery → completed/stopped states — with a plain
+   bash script as the job.

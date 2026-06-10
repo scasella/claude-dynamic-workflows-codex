@@ -18,6 +18,7 @@ const RUNNER = join(dirname(fileURLToPath(import.meta.url)), "..", "runner");
 const MAP = {
   run: "bin/run-workflow.js",
   fleet: "bin/fleet.js",
+  supervise: "bin/supervise.js",
   view: "bin/view-run.js",
   map: "bin/map-run.js",
   summarize: "bin/summarize-run.js",
@@ -31,6 +32,7 @@ if (!cmd || wantsHelp(cmd) || !MAP[cmd] || (cmd === "doctor" && rest.some(wantsH
     "usage: codex-workflows <command> [args]\n\n" +
       "  run <script.js> [flags]   execute a workflow against local Codex\n" +
       "  fleet status|answer […]   supervise concurrent runs\n" +
+      "  supervise -- <cmd> [args] wrap ANY command in the fleet protocol (gates via @@ASK)\n" +
       "  view [target] […]         generate/open the HTML run viewer\n" +
       "  map [target] […]          render the ASCII execution map\n" +
       "  summarize [target] […]    cost/performance/reliability report\n" +

@@ -360,7 +360,11 @@ The whole supervision layer is a **file contract**, not a runner coupling —
 any long-running job that writes the sidecars is supervisable by the same
 tools. The contract (file formats, state machine, answer/steer rules, the
 minimum viable producer) is specified in
-[`fleet-protocol.md`](fleet-protocol.md).
+[`fleet-protocol.md`](fleet-protocol.md), and **`bin/supervise.js`** is its
+reference second producer: `supervise --name nightly -- python evals.py`
+wraps *any* command in the sidecars — output streams as live progress, and an
+`@@ASK {json}` line on the job's stdout becomes a gate whose answer arrives on
+the job's stdin (a bash `echo @@ASK…; read answer` is a complete client).
 
 ### Cross-project robustness
 
