@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "codex-workflows",
+  "displayName": "Codex Workflows",
+  "description": "Run Claude Code dynamic-workflow scripts on a local Codex App Server — fan out Codex/GPT agents with the agent/parallel/pipeline DSL, sessionful steerable workers, supervised fleets (--multi), live viewers, and run analytics.",
+  "author": {
+    "name": "Stephen Casella",
+    "url": "https://github.com/scasella"
+  },
+  "homepage": "https://github.com/scasella/claude-dynamic-workflows-codex#readme",
+  "repository": "https://github.com/scasella/claude-dynamic-workflows-codex",
+  "license": "MIT",
+  "keywords": ["codex", "workflows", "agents", "orchestration", "gpt", "fleet"]
+}

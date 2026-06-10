@@ -2,6 +2,7 @@
   "name": "claude-dynamic-workflows-codex",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Run Claude Code's dynamic-workflow orchestration on a local Codex (GPT) backend, plus an interactive run viewer.",
   "license": "MIT",
   "author": "Stephen Casella",
@@ -12,7 +13,9 @@
   "homepage": "https://github.com/scasella/claude-dynamic-workflows-codex#readme",
   "bugs": "https://github.com/scasella/claude-dynamic-workflows-codex/issues",
   "engines": { "node": ">=18" },
+  "bin": { "codex-workflows": "bin/codex-workflows.js" },
   "scripts": {
+    "sync-skill": "node scripts/sync-skill.js",
     "test": "node runner/test/offline.js && node runner/test/codex-session.test.js && node runner/test/view-run.test.js && node runner/test/view-run.live.test.js && node runner/test/map-run.test.js && node runner/test/summarize-run.test.js && node runner/test/goal-lint.plan.test.js && node runner/test/claim-check.plan.test.js && node runner/test/serve.test.js && node runner/test/fleet.test.js",
     "doctor": "node runner/test/handshake.js",
     "fleet": "node runner/bin/fleet.js",

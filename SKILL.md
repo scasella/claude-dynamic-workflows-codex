@@ -24,9 +24,11 @@ Codex (GPT) thread+turn instead of a Claude subagent.
 the loop below — the work runs on Codex/GPT agents. If the user actually wanted
 Claude subagents, say so and point them at the native Workflow tool.
 
-`RUNNER` below means the bundled runner directory:
-`~/.claude/skills/codex-workflows/runner` (also at `runner/` relative to this
-skill). It is dependency-free Node ≥ 18.
+`RUNNER` below means the bundled runner directory: **`runner/` relative to this
+skill's base directory** (shown when the skill loads). For a classic skills-dir
+install that is `~/.claude/skills/codex-workflows/runner` — the literal paths in
+the examples below assume it; substitute your base directory if this skill is
+installed as a plugin. It is dependency-free Node ≥ 18.
 
 ## Default rough-intent mode
 

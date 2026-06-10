@@ -48,19 +48,36 @@ The first thing you'll notice is what's *not* in the old one-shot model: **long-
 
 ## Install
 
-Clone the repo into your Claude Code skills folder, as the `codex-workflows` skill:
+**As a Claude Code plugin** (recommended — updates with every push):
+
+```
+/plugin marketplace add scasella/claude-dynamic-workflows-codex
+/plugin install codex-workflows@codex-workflows
+```
+
+**Or as a classic skills-dir clone:**
 
 ```bash
 git clone https://github.com/scasella/claude-dynamic-workflows-codex ~/.claude/skills/codex-workflows
 ```
 
+(Developing from a clone elsewhere? `npm run sync-skill` pushes your working
+tree to `~/.claude/skills/codex-workflows` in one command.)
+
 **Prerequisites**
 
 - [Node](https://nodejs.org) ≥ 18 (zero npm dependencies to install)
 - The [`codex`](https://developers.openai.com/codex/cli) CLI on your `PATH`, logged in: `codex login`
-  (verify with `node ~/.claude/skills/codex-workflows/runner/test/handshake.js` → `state: ready`)
 
-That's it — the skill is now available in Claude Code as `/codex-workflows`.
+Either way the skill is now available in Claude Code as `/codex-workflows`.
+Verify Codex is reachable any time with:
+
+```bash
+npx github:scasella/claude-dynamic-workflows-codex doctor   # → state: ready
+```
+
+(The same `npx` entrypoint exposes the whole CLI surface without installing
+anything: `run`, `fleet status|answer`, `view`, `map`, `summarize`.)
 
 ---
 

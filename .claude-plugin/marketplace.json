@@ -1,0 +1,15 @@
+{
+  "name": "codex-workflows",
+  "description": "Codex-backed dynamic workflows for Claude Code: agent fan-outs, sessionful steerable workers, supervised fleets, live run viewers.",
+  "owner": {
+    "name": "Stephen Casella",
+    "url": "https://github.com/scasella"
+  },
+  "plugins": [
+    {
+      "name": "codex-workflows",
+      "source": "./",
+      "description": "Run Claude Code dynamic-workflow scripts on a local Codex App Server — Codex/GPT agent fan-outs, sessionful steerable workers, supervised fleets (--multi), live viewers, run analytics."
+    }
+  ]
+}

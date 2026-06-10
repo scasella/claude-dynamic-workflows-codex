@@ -13,15 +13,19 @@ Thanks for your interest! This is a small, dependency-free project — easy to h
   - `test/` — `offline.js` (unit), `codex-session.test.js` (session driver + chaos), `view-run.test.js` / `view-run.live.test.js` / `map-run.test.js` / `summarize-run.test.js` (viewer + summary robustness across run shapes), `serve.test.js` (cockpit channel), `fleet.test.js` (fleet status/answer + the agent-supervisor loop), `goal-lint.plan.test.js` / `claim-check.plan.test.js` (harness-zoo dry runs), `handshake.js` (live Codex connectivity).
 - `references/` — `authoring.md` (workflow-script DSL) and `runner-readme.md` (architecture / Codex protocol mapping / faithfulness).
 - `examples/` — runnable templates and a bundled `demo/` run.
+- `bin/codex-workflows.js` — the npx/git-install dispatcher (`run` / `fleet` / `view` / `map` / `summarize` / `doctor`).
+- `scripts/sync-skill.js` — one-command sync of the skill surface to `~/.claude/skills/codex-workflows` (`npm run sync-skill`).
+- `.claude-plugin/` — plugin + marketplace manifests (the repo installs directly as a Claude Code plugin).
 
 ## Develop
 
 No build step. Requires Node ≥ 18.
 
 ```bash
-npm test          # offline unit checks + viewer robustness (no Codex, no network)
-npm run doctor    # check the local Codex App Server is reachable & logged in
-npm run demo      # open the bundled sample run in the viewer
+npm test            # offline unit checks + viewer robustness (no Codex, no network)
+npm run doctor      # check the local Codex App Server is reachable & logged in
+npm run demo        # open the bundled sample run in the viewer
+npm run sync-skill  # push your working tree to ~/.claude/skills/codex-workflows
 ```
 
 If you touch `runner/bin/view-run.js`, run `npm test` — `view-run.test.js` renders
