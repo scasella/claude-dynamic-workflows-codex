@@ -118,6 +118,7 @@ You don't manage flags; you describe what you want and Claude wires it up. Commo
 | **Resume after a stop** | "resume that run" | replays already-finished agents from the journal **free**, runs only the rest; sessionful workers re-attach to their persisted threads **warm** |
 | **Be asked before risky steps** | "check with me before applying anything" | authors a `human()` gate — the live viewer shows an **answer card** (choices + free text) right in the run page; the run waits there, fleet warm, and falls back to a safe default on timeout |
 | **Pick a specific pattern** | "do a loop-until-dry bug hunt" · "fresh-context review with independent reviewers" | authors that exact pattern (see the [pattern library](references/authoring.md)) |
+| **Run a supervised fleet** | "`--multi`" · "throw a few different harnesses at this at once" | launches 2–4 concurrent variant workflows in the background and **supervises them itself** — polls `fleet status`, answers their gates, steers, kills dead ends, forks winners, then synthesizes across runs (see walkthrough 8) |
 
 One thing you *don't* tune: it's always **one frontier model for every agent** — no model-mixing. Thinking **effort** scales to the harness instead (a quick 2–5-agent run goes flat `--effort medium`; bigger runs use `--auto-effort`, so lone judge/synthesis gates think hardest). **To spend less**, lower the **budget**, drop the **effort**, narrow the **fan-out**, and **`--plan` first** to size it — never a smaller model. (Read-only is a **safety** choice — what agents may touch — not a cost lever.)
 
@@ -153,6 +154,9 @@ One thing you *don't* tune: it's always **one frontier model for every agent** �
 
 # Triage a result — decide real / overfit / continue, then write the next experiment's /goal (research_result_triage)
 /codex-workflows  Triage the latest research result and write the next /goal
+
+# Fleet — several concurrent workflows, supervised by Claude (answers gates, steers, kills, forks)
+/codex-workflows --multi  Find the cause of the checkout p99 regression — attack it from a few different angles at once
 ```
 
 Rough intent is the default — a sentence or two is enough, and the skill compiles the rest (scale, archetype, pattern, task contract, safe run settings). Add `prompt-only` if you just want the generated invocation without running it.
@@ -214,6 +218,12 @@ Two shipped harness-zoo templates that bracket any expensive run. **GoalLint** t
 > `/codex-workflows  Research the current state of on-device LLM inference, verify every claim against a source, and cite the survivors — watch it live.`
 
 A research fan-out that's honest about what it knows: parallel searches gather candidate claims, an independent pass **verifies each against a real source** (and *reports gaps rather than fabricating* when the evidence isn't there), and a synthesizer writes the cited brief. Confirmed evidence, inference, and uncertainty stay separated — missing evidence is treated as uncertainty, not success.
+
+### 8 · Run a whole fleet — and let Claude supervise it
+
+> `/codex-workflows --multi  Find the cause of the checkout p99 regression — attack it from a few different angles at once, and keep the total under 5M tokens.`
+
+With `--multi`, Claude stops being a launcher and becomes the **operator**. It compiles a *fleet plan* — say, a sessionful deep-dive on the ORM theory, a loop-until-dry sweep of recent diffs, and a log-forensics fan-out — and launches each as its own background run in one shared directory, budget split across them. Then it runs the supervision loop the runner was built for: `fleet status` rolls every run into one digest (who's running, who's **stalled**, who's **waiting on an answer**, who finished and what they returned), and the workflows are authored with **supervisor checkpoints** — `human()` gates whose answers Claude itself supplies via `fleet answer`, with free text acting as a *steer* ("drop the cache theory, go deep on the ORM layer"). A run chasing a dead end gets killed and its tokens stop; a run onto something big gets **forked** — copy the journal, extend the variant, `--resume` replays everything already done at **0 tokens** and sessionful workers re-attach to their threads warm. At the end Claude reconciles the variants' results — including what the killed runs ruled out — into one answer with per-variant costs. The same checkpoints stay human-answerable in the `--gui` cockpit, so you can lean in whenever you want; the difference is you no longer have to. ([examples/fleet](examples/fleet))
 
 > **Sizing & cost.** Unsure how big a run will be? Add **"plan it first"** — a no-token dry run prints the agent count per phase and a budget estimate before you spend anything. Add **"keep it under ~5M tokens"** for a hard ceiling (tripping it is recoverable — it prints a free `--resume`). To spend less: lower the budget, drop the effort, narrow the fan-out — never a smaller model (it's always one frontier model for every agent).
 

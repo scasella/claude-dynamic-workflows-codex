@@ -257,8 +257,10 @@ What each source contributes (all optional except the journal):
   and **interrupted** agents (a `start` with no matching `end`).
 - **`<name>.result.json`** — the workflow's return value, for `--include-result`.
 - **`<name>.meta.json`** — run-level facts the journal can't carry (budget + meter,
-  pinned model, effort policy, sandbox), written once by `run-workflow` at startup
-  (best-effort; runtime-only, git-ignored). Absent → the budget line is simply omitted.
+  pinned model, effort policy, sandbox — plus `pid` / `startedAt` / `script` /
+  `runId`, which `fleet status` uses to tell a live run from a finished or killed
+  one), written once by `run-workflow` at startup (best-effort; runtime-only,
+  git-ignored). Absent → the budget line is simply omitted.
 
 `run-workflow` prints a short recap automatically when a run finishes (one line for
 tiny runs, a small phase table otherwise); `--summary` prints the full report inline,
@@ -305,6 +307,45 @@ skipped with a notice).
 
 Progress goes to **stderr**; the workflow's return value is printed as JSON to
 **stdout** (so `run-workflow wf.js | jq .` works).
+
+### Fleet supervision (`bin/fleet.js`, `--run-id`)
+
+Several runs can execute **concurrently** and be supervised from outside — by a
+human in a second terminal, or (the intended operator) a supervising agent in a
+loop. The pieces:
+
+- **Isolation** — journals derive from the script name, so N concurrent runs of
+  the *same* script need **`--run-id NAME`** (journal + every sidecar become
+  `<base>--NAME.*`). Distinct variant scripts in one shared directory isolate
+  naturally — and that shared directory *is* the fleet.
+- **Discovery** — the journal file is touched **eagerly** at startup, so a
+  just-launched run is visible to `fleet status` (and the viewers) before its
+  first agent completes.
+- **`fleet status [dir|journal ...] [--json] [--stall-after S]`** — one digest
+  across every run found: a derived state machine (**completed** = a result
+  sidecar fresher than this run's `startedAt` · **running** = the recorded pid is
+  alive · **stopped** = started but pid gone with no fresh result, i.e.
+  killed/crashed/budget-tripped → resumable · **idle** = journal only), phase +
+  agent progress, tokens vs budget, **stall** detection (a live pid with no
+  events past the threshold — unless it's waiting on a question, which is
+  *waiting*, not stalled), and every **pending `human()` question** with a
+  paste-ready answer command. `src/fleetStatus.js` is the pure logic (clock and
+  pid-liveness injectable; see `test/fleet.test.js`).
+- **`fleet answer --journal J --id ID --answer TEXT [--answer-json]`** — the
+  write side of the supervisor channel: validates the id against the run's
+  *currently-pending* questions (same rule as the `--serve` cockpit's endpoint —
+  no pre-answering, no re-answering; a bare `qid` resolves if unambiguous) and
+  appends to `<name>.answers.jsonl`, which the running workflow polls (~500ms).
+  `--list` shows a run's asked/pending questions. Free-text answers are how a
+  supervisor **steers**: author workflows with checkpoint gates whose answers
+  the script applies (e.g. `session.steer(directive)`).
+- **Fork** — copy a journal to a new name, point an edited variant at it with
+  `--journal <copy> --resume`: the unchanged prefix replays at 0 tokens and
+  sessionful workers re-attach to their threads warm; only the new direction
+  spends. Kill + `--resume` (same journal) is the degenerate case.
+
+`examples/fleet/` is a runnable two-variant fleet with the full supervision
+transcript; the `/codex-workflows --multi` skill mode automates the whole loop.
 
 ### Cross-project robustness
 

@@ -5,7 +5,8 @@ description: >-
   Codex / GPT agents (the agent / parallel / pipeline / phase / budget DSL)
   instead of Claude subagents, for codebase audits, large migrations, and
   multi-agent review or research. Give it one or two rough sentences and it
-  compiles the right harness for you. Manual-invoke only via /codex-workflows.
+  compiles the right harness for you; add --multi for a supervised fleet of
+  concurrent workflows. Manual-invoke only via /codex-workflows.
 disable-model-invocation: true
 ---
 
@@ -72,6 +73,7 @@ Read the mode from the user's phrasing, then behave accordingly:
 | Mode | Trigger | Behavior |
 |------|---------|----------|
 | **default** (rough-intent) | 1–2 rough sentences | Compile internally → author → run. State assumptions. |
+| **`--multi`** (fleet) | the `--multi` flag, or "fleet" / "several workflows at once" | Compile a **fleet plan** (2–4 concurrent variant workflows, similar and/or diverse), launch them in the background, and **supervise**: poll `fleet status`, answer gates, steer, kill, fork, then synthesize. See *Fleet mode*. |
 | **`prompt-only`** | "prompt-only", "just the invocation", "don't run it" | Emit a complete `/codex-workflows` invocation/spec (the A–L structure below) and **STOP** — do not author or run. |
 | **`write-only`** | "write it but don't run", "author only" | Author the workflow script, print its path, stop before running. |
 | **`run-existing`** | a script path or saved-workflow name is given | Skip compilation; run that script/name through the runner. |
@@ -165,6 +167,98 @@ are unchanged; steps 2 and 4 are where rough intent gets compiled.
 **Do NOT call the native `Workflow` tool while using this skill.** Authoring the
 script and running it through the CLI above is exactly what routes the work to
 Codex; invoking the native tool would spawn Claude subagents instead.
+
+## Fleet mode (`--multi`): launch, supervise, steer
+
+When the user passes **`--multi`** (or asks for a fleet / several workflows at
+once), **you are the operator of N concurrent runs** — not a fire-and-forget
+launcher. You compile a fleet plan, launch every variant in the background,
+then run a supervision loop: poll status, answer gates, steer drifting workers,
+kill dead ends, fork promising leads, and synthesize at the end. The human sets
+policy once (goal, total budget, risk tolerance); **you** make the mid-run
+judgment calls the variants can't make for themselves.
+
+### 1 · Compile the fleet plan
+
+Decompose the intent into **2–4 variants** and state the plan (variants, what
+each bets on, per-run budgets) before launching. Two axes, freely mixed:
+
+- **Similar** — the *same* harness, different slices: split a big input across
+  runs via `--args`, or attack the same question from different starting
+  hypotheses/seeds. One script + per-run `--args` + **`--run-id`** (so the
+  journals don't collide), or N copies of the script.
+- **Diverse** — *different* harness shapes betting on different theories of the
+  task: e.g. a `loop_until_dry` bug hunt vs an `adversarial_verification` sweep
+  vs a `sessionful_controller_loop` investigation, all aimed at the same goal.
+  One script per variant.
+
+Split the user's overall budget across variants (status shows each run's
+spend against its ceiling). Apply the *Anti-overbuild rule* to the fleet too:
+2 well-differentiated variants beat 4 redundant ones — every variant must bet
+on something the others don't.
+
+### 2 · Author for supervision
+
+Every variant gets **supervisor checkpoints** — `human()` gates at the
+junctures where an outside judgment can redirect the run:
+
+```js
+const directive = await human(
+  `Round ${round} findings: ${summary}. Directive for next round?`,
+  { id: `round${round}`, choices: ["continue", "stop"], default: "continue", timeoutMs: 240_000 })
+if (directive === "stop") break
+if (directive !== "continue") await worker.steer(directive)   // free text = a steer
+```
+
+This is the steer channel: a free-text answer **is** the directive, and the
+script applies it (`session.steer(...)`, re-aiming the next round, narrowing
+scope). Place gates between rounds, before expensive phases, and on
+uncertainty. Defaults must be safe — an unanswered gate times out to its
+default and the run degrades hands-off, never hangs. (This rides the journaled
+`human()` channel, so a `--resume` replays answers instead of re-asking.)
+
+### 3 · Launch — one directory per fleet, every run in the background
+
+Variants share one directory (that's what `fleet status <dir>` supervises).
+Launch each with `run_in_background`, **always with `--interactive`** (it
+enables the answer channel headlessly):
+
+```bash
+node ~/.claude/skills/codex-workflows/runner/bin/run-workflow.js hunt-orm.workflow.js \
+  --frontier --auto-effort --interactive --budget 1500000 1>hunt-orm.result.json
+# same script, different slice → isolate with --run-id:
+node …/run-workflow.js hunt.workflow.js --args '{"slice":"auth"}' --run-id auth --interactive …
+```
+
+### 4 · Supervise — the loop
+
+Poll the fleet digest between other work (and promptly while gates may be
+pending — they time out to defaults):
+
+```bash
+node ~/.claude/skills/codex-workflows/runner/bin/fleet.js status <fleet-dir>   # --json to parse
+```
+
+One line per run — state (running / completed / stopped / idle), phase + agent
+progress, tokens vs budget — plus an ⚠ line per condition needing you. React:
+
+| Signal | Your move |
+|--------|-----------|
+| ⚠ waiting on `[id]` "question" | Decide with your full conversation context, then `fleet.js answer --journal <J> --id '<id>' --answer '<choice or free-text directive>'` (`--answer-json` for structured) |
+| ⚠ stalled (no activity past threshold) | Inspect its stderr/`--gui`; if hopeless, kill the background task, then rerun with `--resume` (completed agents replay at 0 tokens; sessionful workers re-attach to their threads **warm**) |
+| A run chasing a dead end | Kill its task; note why, fold the negative result into the synthesis |
+| A run onto something big | **Fork it**: copy the journal to a new name, point an edited/extended variant at it with `--journal <copy> --resume` — the unchanged prefix replays free and only the new direction spends tokens |
+| ⚠ at/over budget · `stopped` | Decide: resume the most promising with a higher `--budget`, or harvest what's journaled (`summarize-run` shows where the tokens went) |
+
+### 5 · Harvest and synthesize
+
+When all runs are terminal: read each run's result (`<journal>.result.json` or
+the stdout you captured), reconcile agreements/conflicts across variants, and
+report **per-variant**: what it bet on, what it found, what it cost
+(`fleet.js status --json` has tokens; `summarize-run` has the breakdown).
+Negative results from killed runs are findings too. To **chain** fleets, feed
+one run's `result.json` into the next launch's `--args-file` — composition
+happens at this level, not inside scripts.
 
 ## Compiling rough intent into a workflow
 
@@ -499,10 +593,13 @@ Globals:
 - `pipeline(items, ...stages)` → per-item staging, no barrier; a stage that
   throws drops that item to `null`. Stages get `(prev, originalItem, index)`.
 - `phase(title)` / `log(msg)` → progress (stderr).
-- `human(question, { id, choices, default, timeoutMs })` → a **declared human
-  fork**: resolves from `args.checkpointAnswers` / the journal first, then the live
-  channel (`--gui` answer card or the answers sidecar), else the default on timeout
-  — never hangs unattended. Journaled (`--resume` never re-asks); not an agent.
+- `human(question, { id, choices, default, timeoutMs })` → a **declared
+  checkpoint fork** (the answerer can be a human *or* a supervising agent):
+  resolves from `args.checkpointAnswers` / the journal first, then the live
+  channel (`--gui` answer card, `fleet.js answer`, or the answers sidecar), else
+  the default on timeout — never hangs unattended. Journaled (`--resume` never
+  re-asks); not an agent. In fleet mode this is the **steer channel** — author
+  gates whose free-text answers the script applies (see *Fleet mode*).
 - `args` → the value passed via `--args` / `--args-file`.
 - `budget` → `{ total, spent(), remaining() }` (token accounting).
 - `workflow(ref, args?)` → run another script inline (one level). `ref` is a
@@ -549,6 +646,10 @@ run-workflow <script.js>
   --plan           dry run: count agents per phase/effort + estimate a --budget (no tokens)
   --tui            open a LIVE ASCII map of the run in a new terminal window
   --gui            open a LIVE HTML viewer of the run in your browser (--monitor = both)
+  --interactive    enable the human() answer channel headlessly — answered via
+                   fleet.js answer (a supervising agent) or the answers sidecar
+  --run-id NAME    suffix the default journal/sidecars so concurrent runs of the
+                   SAME script don't collide (fleet mode)
   --retries N      transient-error retries per agent (default 3)
   --resume         reuse prior results from the journal (skip unchanged agents)
   --journal PATH | --fresh | --no-journal
