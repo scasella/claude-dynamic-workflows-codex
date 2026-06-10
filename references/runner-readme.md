@@ -330,7 +330,11 @@ loop. The pieces:
   events past the threshold — unless it's waiting on a question, which is
   *waiting*, not stalled), and every **pending `human()` question** with a
   paste-ready answer command. `src/fleetStatus.js` is the pure logic (clock and
-  pid-liveness injectable; see `test/fleet.test.js`).
+  pid-liveness injectable; see `test/fleet.test.js`). For a human watching:
+  **`--watch`** redraws the digest in place every 2s until all runs are
+  terminal, and **`--html PATH [--open]`** writes a self-contained card-per-run
+  dashboard (auto-refreshes while any run is live; links each run's generated
+  viewer page when present; `--watch --html` rewrites it each cycle).
 - **`fleet answer --journal J --id ID --answer TEXT [--answer-json]`** — the
   write side of the supervisor channel: validates the id against the run's
   *currently-pending* questions (same rule as the `--serve` cockpit's endpoint —

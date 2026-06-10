@@ -249,6 +249,10 @@ polled (e.g. append `$WORKFLOW_EVENT` to a file you watch, or a macOS
 node ~/.claude/skills/codex-workflows/runner/bin/fleet.js status <fleet-dir>   # --json to parse
 ```
 
+(When the *user* wants to watch alongside you, add `--watch` for an in-place
+terminal redraw, or `--html fleet.html --open` for a card-per-run browser
+dashboard that auto-refreshes while runs are live.)
+
 One line per run — state (running / completed / stopped / idle), phase + agent
 progress, tokens vs budget — plus an ⚠ line per condition needing you. React:
 

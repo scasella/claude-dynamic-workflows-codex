@@ -9,7 +9,7 @@
 // bin/fleet.js.
 
 import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname, basename, join } from "node:path";
 import { listJournals, buildLiveRunModel, readRunMeta, resultPathFor, progressPathFor } from "./runModel.js";
 
 export function pidAlive(pid) {
@@ -201,4 +201,92 @@ export function renderFleetText(infos, { resultChars = 220 } = {}) {
     if (r.state === "stopped") lines.push(`    → resume: run-workflow.js ${r.script ?? "<script>"} --resume --journal ${r.journal} [same flags]`);
   }
   return lines.join("\n");
+}
+
+// ── HTML dashboard ───────────────────────────────────────────────────────────
+// One self-contained card-per-run page for a HUMAN watching the fleet (the
+// text/--json digests are the agent surface). Auto-refreshes while any run is
+// live; links each run to its generated viewer page when one exists.
+
+const esc = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+const STATE_COLOR = { running: "#e8b339", completed: "#4cc38a", stopped: "#e5484d", idle: "#8b8d98" };
+
+export function renderFleetHtml(infos, { title = "fleet" } = {}) {
+  const anyRunning = infos.some((r) => r.state === "running");
+  const counts = {};
+  for (const r of infos) counts[r.state] = (counts[r.state] || 0) + 1;
+  const head = Object.entries(counts).map(([s, n]) => `${n} ${s}`).join(" · ") || "no runs";
+  const attention = infos.filter((r) => r.needsAttention).length;
+
+  const cards = infos.map((r) => {
+    const color = STATE_COLOR[r.state] ?? "#8b8d98";
+    const name = r.runId && !String(r.name).includes(String(r.runId)) ? `${r.name} (${r.runId})` : r.name;
+    // Link to the run's generated viewer page if one exists next to the run dir.
+    const runDir = dirname(dirname(r.journal));
+    const viewerName = basename(r.journal).replace(/\.jsonl$/i, "") + ".run.html";
+    const viewerHref = existsSync(join(runDir, viewerName)) ? viewerName : null;
+
+    const bits = [];
+    if (r.state === "running") bits.push(`running ${fmtAgo(r.ageMs)}`);
+    else if (r.state === "completed") bits.push(`completed${r.endedAgoMs != null ? ` ${fmtAgo(r.endedAgoMs)} ago` : ""}`);
+    else if (r.state === "stopped") bits.push("stopped without a result — resumable");
+    else bits.push("idle");
+    if (r.phase && r.phaseProgress) bits.push(`phase ${esc(r.phase)} (${r.phaseProgress.index}/${r.phaseProgress.total})`);
+    bits.push(r.agents.running ? `${r.agents.done} done + ${r.agents.running} running` : `${r.agents.done} agents`);
+    if (r.sessions) bits.push(`${r.sessions} worker${r.sessions === 1 ? "" : "s"}`);
+    bits.push(`${fmtTokens(r.tokens)} tok${r.budget != null ? ` / ${fmtTokens(r.budget)} budget` : ""}`);
+
+    const warns = [];
+    for (const q of r.pendingQuestions) {
+      warns.push(
+        `<div class="q"><div class="qhead">⚠ waiting ${fmtAgo(q.askedAgoMs)} on <b>[${esc(q.id)}]</b></div>` +
+          `<div class="qtext">${esc(q.question)}</div>` +
+          (q.choices ? `<div class="qmeta">choices: ${esc(q.choices.join(" | "))}${q.default != null ? ` · default: ${esc(q.default)}` : ""}</div>` : "") +
+          `<code>fleet.js answer --journal ${esc(r.journal)} --id '${esc(q.id)}' --answer '&lt;text&gt;'</code></div>`,
+      );
+    }
+    if (r.stalled) warns.push(`<div class="q">⚠ stalled — no activity for ${fmtAgo(r.lastActivityAgoMs)}</div>`);
+    if (r.overBudget) warns.push(`<div class="q">⚠ at/over budget — ${fmtTokens(r.tokens)} of ${fmtTokens(r.budget)}</div>`);
+    if (r.state === "stopped") warns.push(`<div class="q">→ resume: <code>run-workflow.js ${esc(r.script ?? "&lt;script&gt;")} --resume --journal ${esc(r.journal)}</code></div>`);
+
+    let resultHtml = "";
+    if (r.state === "completed" && r.result !== undefined) {
+      let s;
+      try { s = JSON.stringify(r.result, null, 1); } catch { s = String(r.result); }
+      if (s && s.length > 1200) s = s.slice(0, 1200) + "…";
+      resultHtml = `<pre class="result">${esc(s)}</pre>`;
+    }
+
+    return (
+      `<div class="card" style="border-left-color:${color}">` +
+      `<div class="chead"><span class="dot" style="background:${color}"></span><b>${esc(name)}</b>` +
+      `<span class="state" style="color:${color}">${r.state}</span>` +
+      (viewerHref ? ` <a href="${esc(viewerHref)}">open run viewer →</a>` : "") +
+      `</div><div class="cmeta">${bits.join(" · ")}</div>${warns.join("")}${resultHtml}</div>`
+    );
+  });
+
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+${anyRunning ? '<meta http-equiv="refresh" content="3">' : ""}
+<title>${esc(title)} — fleet</title>
+<style>
+  body{background:#0f1115;color:#e6e6ea;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:920px;margin:24px auto;padding:0 16px}
+  h1{font-size:18px;font-weight:600} h1 small{color:#8b8d98;font-weight:400;margin-left:10px}
+  .card{background:#16181d;border:1px solid #26282f;border-left:3px solid;border-radius:8px;padding:12px 14px;margin:10px 0}
+  .chead{display:flex;align-items:center;gap:8px} .chead a{color:#6ea8fe;text-decoration:none;margin-left:auto;font-size:13px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .state{font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .cmeta{color:#a5a8b3;font-size:13px;margin-top:3px}
+  .q{background:#1d1a13;border:1px solid #3a3220;border-radius:6px;padding:8px 10px;margin-top:8px;font-size:13px}
+  .qtext{margin:4px 0;white-space:pre-wrap} .qmeta{color:#a5a8b3;font-size:12px}
+  code{display:block;background:#0f1115;border-radius:4px;padding:6px 8px;margin-top:6px;font:12px ui-monospace,Menlo,monospace;color:#9ecbff;overflow-x:auto;white-space:pre}
+  .result{background:#10141a;border:1px solid #1f2a37;border-radius:6px;padding:8px 10px;margin:8px 0 0;font:12px ui-monospace,Menlo,monospace;white-space:pre-wrap;color:#bfe3c0;max-height:260px;overflow:auto}
+  footer{color:#5c5f6a;font-size:12px;margin-top:16px}
+</style></head><body>
+<h1>fleet: ${infos.length} run${infos.length === 1 ? "" : "s"} <small>${esc(head)}${attention ? ` · ⚠ ${attention} need${attention === 1 ? "s" : ""} attention` : ""}</small></h1>
+${cards.join("\n")}
+<footer>${anyRunning ? "live — refreshes every 3s" : "all runs terminal — static"} · generated by fleet.js status --html</footer>
+</body></html>`;
 }

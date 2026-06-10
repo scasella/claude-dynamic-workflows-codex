@@ -16,7 +16,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, utimesSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
-import { inspectRun, resolveTargets, renderFleetText, pidAlive } from "../src/fleetStatus.js";
+import { inspectRun, resolveTargets, renderFleetText, renderFleetHtml, pidAlive } from "../src/fleetStatus.js";
 
 const FLEET = new URL("../bin/fleet.js", import.meta.url).pathname;
 const RUN = new URL("../bin/run-workflow.js", import.meta.url).pathname;
@@ -109,6 +109,23 @@ try {
   assert.match(text, /stopped WITHOUT a result/);
   assert.match(text, /result: \{"headline":"shipped"\}/);
   assert.match(text, /fleet\.js answer --journal/, "pending questions carry a paste-ready answer command");
+
+  // HTML dashboard: live fleets auto-refresh, terminal ones are static, and
+  // run-provided text is escaped
+  const htmlLive = renderFleetHtml([done, stop, live, stall]);
+  assert.match(htmlLive, /http-equiv="refresh"/, "a live fleet's dashboard auto-refreshes");
+  assert.match(htmlLive, /fleet: 4 runs/);
+  assert.ok(htmlLive.includes("Include admin routes?"), "pending questions render on the dashboard");
+  assert.match(htmlLive, /fleet\.js answer --journal/);
+  assert.ok(!renderFleetHtml([done]).includes('http-equiv="refresh"'), "an all-terminal dashboard is static");
+  const evil = { ...live, pendingQuestions: [{ id: "x", qid: "x", question: "<script>alert(1)</script>", choices: null, default: null, askedAgoMs: 5 }] };
+  assert.ok(!renderFleetHtml([evil]).includes("<script>alert"), "question text is HTML-escaped");
+
+  // the CLI writes the dashboard file
+  const dashPath = join(ROOT, "dash.html");
+  const dash = spawnSync("node", [FLEET, "status", dir1, "--html", dashPath], { encoding: "utf8" });
+  assert.equal(dash.status, 0, dash.stderr);
+  assert.match(readFileSync(dashPath, "utf8"), /fleet: 4 runs/, "--html writes the dashboard");
 
   // ── 2 · fleet answer CLI ───────────────────────────────────────────────────
   writeFileSync(J("live.workflow.questions.json"), JSON.stringify([

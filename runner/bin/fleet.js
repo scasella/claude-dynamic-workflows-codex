@@ -20,14 +20,22 @@
 // `fleet answer … --answer 'drop the cache theory; go deep on the ORM layer'`
 // IS the steer. Kill + `run-workflow --resume` forks/redirects everything else.
 
-import { appendFileSync } from "node:fs";
-import { inspectFleet, renderFleetText } from "../src/fleetStatus.js";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { inspectFleet, renderFleetText, renderFleetHtml } from "../src/fleetStatus.js";
 import { readQuestions, answersPathFor } from "../src/runModel.js";
 
 function usage(code = 1) {
   console.error(
     "usage: fleet status [dir|journal ...] [--json] [--stall-after SECONDS]\n" +
-      "       fleet answer --journal PATH (--list | --id ID --answer TEXT [--answer-json])",
+      "                    [--watch] [--html PATH [--open]]\n" +
+      "       fleet answer --journal PATH (--list | --id ID --answer TEXT [--answer-json])\n" +
+      "\n" +
+      "  --watch   re-render the digest in place every 2s (and rewrite --html if set)\n" +
+      "            until every run is terminal\n" +
+      "  --html P  write a self-contained card-per-run dashboard page (auto-refreshes\n" +
+      "            while any run is live; links each run's viewer page when present)",
   );
   process.exit(code);
 }
@@ -38,10 +46,16 @@ if (cmd === "status") {
   const targets = [];
   let json = false;
   let stallAfterMs = 120_000;
+  let watch = false;
+  let html = null;
+  let open = false;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--json") json = true;
     else if (a === "--stall-after") stallAfterMs = Number(rest[++i]) * 1000;
+    else if (a === "--watch") watch = true;
+    else if (a === "--html") html = rest[++i];
+    else if (a === "--open") open = true;
     else if (a === "-h" || a === "--help") usage(0);
     else if (a.startsWith("--")) usage();
     else targets.push(a);
@@ -50,10 +64,41 @@ if (cmd === "status") {
     console.error("--stall-after: expected a positive number of seconds");
     process.exit(1);
   }
-  const infos = inspectFleet(targets, { stallAfterMs });
-  if (json) console.log(JSON.stringify(infos, null, 2));
-  else console.log(renderFleetText(infos));
-  process.exit(0);
+
+  const cycle = () => {
+    const infos = inspectFleet(targets, { stallAfterMs });
+    if (html) { try { writeFileSync(resolve(html), renderFleetHtml(infos)); } catch (e) { console.error(`--html: ${e.message}`); process.exit(1); } }
+    return infos;
+  };
+  const openOnce = () => {
+    if (!open || !html) return;
+    const cmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+    try { spawn(cmd, [resolve(html)], { stdio: "ignore", detached: true }).unref(); } catch {}
+  };
+
+  if (!watch) {
+    const infos = cycle();
+    if (json) console.log(JSON.stringify(infos, null, 2));
+    else console.log(renderFleetText(infos));
+    if (html) console.error(`dashboard: ${resolve(html)}`);
+    openOnce();
+    process.exit(0);
+  }
+
+  // --watch: redraw in place every 2s (and rewrite --html) until all terminal.
+  openOnce();
+  let sawRunning = false;
+  for (;;) {
+    const infos = cycle();
+    const running = infos.some((r) => r.state === "running");
+    if (running) sawRunning = true;
+    process.stdout.write("\x1b[2J\x1b[H" + renderFleetText(infos) + `\n\n(watch — ${new Date().toLocaleTimeString()}; Ctrl-C to stop)\n`);
+    if (sawRunning && !running) {
+      process.stdout.write("all runs terminal — watch done\n");
+      process.exit(0);
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
 }
 
 if (cmd === "answer") {

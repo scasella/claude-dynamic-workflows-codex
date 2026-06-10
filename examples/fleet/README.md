@@ -37,6 +37,9 @@ distinct journals; same-script variants would add `--run-id <name>`). Pass
 
 ```bash
 node $RUNNER/bin/fleet.js status .          # --json for a parseable digest
+# watching alongside? in-place terminal redraw, or a browser dashboard:
+node $RUNNER/bin/fleet.js status . --watch
+node $RUNNER/bin/fleet.js status . --watch --html fleet.html --open
 ```
 
 ```text
