@@ -75,6 +75,7 @@ export async function runWorkflowSource(src, options = {}) {
     args: runtime.args,
     budget: runtime.budget,
     workflow: runtime.workflow,
+    human: runtime.human,
     console: safeConsole(runtime.log),
   };
   const context = vm.createContext(sandbox, {

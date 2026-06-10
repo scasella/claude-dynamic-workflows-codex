@@ -16,7 +16,7 @@ import { liveState, buildRunModel, locateRun, listJournals } from "../src/runMod
 import { resolveModel, pickFrontier } from "../src/modelMap.js";
 import { loadAgentType } from "../src/agentTypes.js";
 import { isRetryable, strictifySchema } from "../src/codexAgent.js";
-import { recordTokenUsage, resetMeter, tokensSpent, outputSpent, tokensForThread } from "../src/meter.js";
+import { recordTokenUsage, resetMeter, tokensSpent, outputSpent, tokensForThread, markResumedThread } from "../src/meter.js";
 import { versionDriftNote } from "../src/codexVersion.js";
 
 const exec = promisify(execFile);
@@ -746,9 +746,155 @@ function makeFakeSessionFactory() {
   assert.equal(lines[0].label, "worker");
   assert.equal(lines[0].phase, "Explore");
   assert.equal(lines[0].tokens, 7);
+  assert.equal(lines[0].sessionId, "s1", "entry carries the worker id (the viewer groups turns by it)");
+  assert.equal(lines[0].turn, 0, "entry carries the turn index");
+  assert.ok(lines[0].threadId, "entry carries the Codex thread id (resume re-attach + provenance)");
   const agentKey = j.nextKey("go", { model: null });
   assert.ok(!agentKey.startsWith("sess:"), "agent() keys are NEVER in the sess: namespace (no fake resurrection)");
   await rm(dir, { recursive: true, force: true });
+}
+
+// 34b) warm-context session resume: with --resume + a re-attachable thread, the
+//      journaled completed-turn prefix replays FREE and follow-up turns run live
+//      on the SAME (warm) thread; a failed re-attach re-runs everything live.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-sessr-"));
+  const jpath = join(dir, "s.jsonl");
+  // run 1: live — journal two completed turns (threadId fake-thread-1)
+  const j1 = new Journal(jpath, { reuse: false });
+  await j1.load();
+  const fake1 = makeFakeSessionFactory();
+  const r1 = await runWorkflowSource([
+    'export const meta = { name: "sessr" };',
+    'const s = await agent.start("load corpus", { label: "w" });',
+    'await s.wait();',
+    'const t1 = await s.steer("question one");',
+    'return t1.result;',
+  ].join("\n"), { startSession: fake1.startSession, journal: j1 });
+  assert.equal(r1, "echo:question one");
+
+  // run 2: resume — re-attach succeeds; both journaled turns replay with NO model
+  // work; a NEW steer runs live on the resumed thread.
+  const j2 = new Journal(jpath, { reuse: true });
+  await j2.load();
+  const beginCalls = [];
+  let resumeReq = null;
+  const startSession2 = async (opts) => {
+    resumeReq = opts.resumeThreadId ?? null;
+    const threadId = opts.resumeThreadId ?? "fresh-thread";
+    return {
+      threadId, resumed: !!opts.resumeThreadId,
+      async beginTurn(prompt) {
+        beginCalls.push(String(prompt));
+        return { turnId: threadId + ":t" + beginCalls.length, completion: Promise.resolve({ status: "completed", result: "live:" + prompt, text: "live:" + prompt, error: null, model: "fake", tokens: 5, ms: 1, turnId: "x" }) };
+      },
+      async interruptCurrent() {},
+      async cleanup() {},
+    };
+  };
+  const events2 = [];
+  const r2 = await runWorkflowSource([
+    'export const meta = { name: "sessr" };',
+    'const s = await agent.start("load corpus", { label: "w" });',
+    'const a = await s.wait();',
+    'const b = await s.steer("question one");',
+    'const c = await s.steer("question two");',
+    'return { a: a.result, b: b.result, c: c.result, thread: s.threadId };',
+  ].join("\n"), { startSession: startSession2, journal: j2, onEvent: (e) => events2.push(e) });
+  assert.equal(resumeReq, "fake-thread-1", "the runtime passes the journaled thread id to re-attach");
+  assert.equal(r2.a, "echo:load corpus", "turn 0 replays the journaled result");
+  assert.equal(r2.b, "echo:question one", "turn 1 (steer) replays too");
+  assert.equal(r2.c, "live:question two", "the NEW steer runs live on the warm thread");
+  assert.equal(beginCalls.length, 1, "exactly one live turn — the replayed prefix never re-runs");
+  assert.equal(r2.thread, "fake-thread-1", "the worker is on its original (re-attached) thread");
+  assert.equal(events2.filter((e) => e.type === "cached" && e.kind === "session").length, 2,
+    "replayed session turns emit 'cached' events (the viewer/summary count them as cache hits)");
+
+  // run 3: resume but re-attach FAILS → the turn re-runs live (no fake resurrection).
+  const j3 = new Journal(jpath, { reuse: true });
+  await j3.load();
+  const liveCalls = [];
+  const startSession3 = async () => ({
+    threadId: "fresh-2", resumed: false,
+    async beginTurn(prompt) { liveCalls.push(String(prompt)); return { turnId: "t" + liveCalls.length, completion: Promise.resolve({ status: "completed", result: "live:" + prompt, text: "", error: null, model: "fake", tokens: 5, ms: 1, turnId: "y" }) }; },
+    async interruptCurrent() {}, async cleanup() {},
+  });
+  const r3 = await runWorkflowSource([
+    'export const meta = { name: "sessr" };',
+    'const s = await agent.start("load corpus", { label: "w" });',
+    'const a = await s.wait();',
+    'return a.result;',
+  ].join("\n"), { startSession: startSession3, journal: j3 });
+  assert.equal(r3, "live:load corpus", "failed re-attach → the turn re-runs live");
+  assert.equal(liveCalls.length, 1);
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 34b-prompt) warm resume is PROMPT-CHECKED, not blindly positional: if a turn's
+// prompt CHANGES on resume (e.g. a steer built from an edited human() answer), the
+// cached result must NOT be served — that turn AND every later turn re-run live so
+// the warm thread context stays consistent. Regression for the positional-replay bug.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-sesspc-"));
+  const jpath = join(dir, "s.jsonl");
+  // run 1: journal turn 0 ("load") and turn 1 ("ask A") as completed.
+  const j1 = new Journal(jpath, { reuse: false });
+  await j1.load();
+  const fake1 = makeFakeSessionFactory();
+  await runWorkflowSource([
+    'export const meta = { name: "pc" };',
+    'const s = await agent.start("load", { label: "w" });',
+    'await s.wait();',
+    'await s.steer("ask A");',
+    'return 1;',
+  ].join("\n"), { startSession: fake1.startSession, journal: j1 });
+
+  // run 2: resume, re-attach OK, but the SECOND turn's prompt is now "ask B" (changed).
+  // turn 0 ("load") still matches → replays; turn 1 differs → re-runs live; and there's
+  // no fake "ask A" answer served.
+  const j2 = new Journal(jpath, { reuse: true });
+  await j2.load();
+  const liveCalls = [];
+  const startSession2 = async (opts) => ({
+    threadId: opts.resumeThreadId ?? "fresh", resumed: !!opts.resumeThreadId,
+    async beginTurn(prompt) {
+      liveCalls.push(String(prompt));
+      return { turnId: "t" + liveCalls.length, completion: Promise.resolve({ status: "completed", result: "live:" + prompt, text: "live:" + prompt, error: null, model: "fake", tokens: 5, ms: 1, turnId: "z" }) };
+    },
+    async interruptCurrent() {}, async cleanup() {},
+  });
+  const r2 = await runWorkflowSource([
+    'export const meta = { name: "pc" };',
+    'const s = await agent.start("load", { label: "w" });',
+    'const a = await s.wait();',
+    'const b = await s.steer("ask B");', // CHANGED from "ask A"
+    'return { a: a.result, b: b.result };',
+  ].join("\n"), { startSession: startSession2, journal: j2 });
+  assert.equal(r2.a, "echo:load", "turn 0 prompt unchanged → still replays from the journal");
+  assert.equal(r2.b, "live:ask B", "turn 1 prompt CHANGED → runs live (the stale 'ask A' result is NOT served)");
+  assert.equal(liveCalls.length, 1, "only the changed turn re-ran live");
+  assert.deepEqual(liveCalls, ["ask B"], "the live turn used the NEW prompt");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 34c) resumed-thread meter baseline: a re-attached thread may report cumulative
+//      usage that includes PRIOR-run history — the meter must bill only this run.
+{
+  resetMeter();
+  markResumedThread("th-resumed");
+  const usage = (total, last) => ({
+    threadId: "th-resumed",
+    tokenUsage: {
+      total: { totalTokens: total, inputTokens: total - 10, outputTokens: 8, reasoningOutputTokens: 2 },
+      last: { totalTokens: last, inputTokens: last - 10, outputTokens: 8, reasoningOutputTokens: 2 },
+    },
+  });
+  recordTokenUsage(usage(110_000, 10_000)); // 100k of history + 10k this turn
+  assert.equal(tokensForThread("th-resumed").total, 10_000, "history is baselined away");
+  recordTokenUsage(usage(130_000, 30_000));
+  assert.equal(tokensForThread("th-resumed").total, 30_000, "later readings keep subtracting the baseline");
+  assert.equal(tokensSpent(), 30_000, "budget meter bills only this run's spend");
+  resetMeter();
 }
 
 // 35) runtime finalization closes sessions the workflow left open (cancel + cleanup).
@@ -852,6 +998,102 @@ function makeFakeSessionFactory() {
   ].join("\n"), { runAgent: echo, startSession: fake.startSession });
   assert.equal(r.a, "one-shot", "classic agent() is unchanged alongside sessions");
   assert.equal(r.s, "echo:session", "agent.start works in the same workflow");
+}
+
+// ── human(question, opts?) — the interactive involvement mode ────────────────
+
+// 37) resolution order: --plan and args.checkpointAnswers never block; with no
+//     channel the default comes back immediately (hands_off degradation).
+{
+  const src = [
+    'export const meta = { name: "hq" };',
+    'const a = await human("Include admin routes?", { id: "scope", choices: ["include", "exclude"], default: "exclude" });',
+    'return a;',
+  ].join("\n");
+  assert.equal(await runWorkflowSource(src, { plan: true }), "exclude", "--plan returns the default");
+  assert.equal(await runWorkflowSource(src, { args: { checkpointAnswers: { scope: "include" } } }), "include",
+    "args.checkpointAnswers wins (the documented resume convention)");
+  assert.equal(await runWorkflowSource(src, {}), "exclude", "no channel → the default, no blocking");
+  // no default and no choices → null, still no blocking
+  const r = await runWorkflowSource('export const meta={name:"hq2"};return await human("free-form?");', {});
+  assert.equal(r, null);
+
+  // anon question numbering counts ONLY id-less calls, so an explicit-id call before
+  // an anonymous one doesn't shift the anon key (which would break resume replay).
+  const notified = [];
+  await runWorkflowSource([
+    'export const meta = { name: "hq3" };',
+    'await human("named", { id: "guard", default: "g" });', // explicit id — must NOT consume q1
+    'await human("anon one", { default: "a1" });',
+    'await human("anon two", { default: "a2" });',
+    'return 1;',
+  ].join("\n"), { humanChannel: { notify: (q) => notified.push(q.qid), wait: async () => undefined } });
+  assert.deepEqual(notified, ["guard", "q1", "q2"], "anon keys are q1/q2 regardless of the preceding id'd call");
+}
+
+// 38) the live channel: notify carries the question, the answer is returned and
+//     JOURNALED (under human:<id>#<occ>), and a --resume run replays it free.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-human-"));
+  const jpath = join(dir, "h.jsonl");
+  const j1 = new Journal(jpath, { reuse: false });
+  await j1.load();
+  const notified = [];
+  const channel = {
+    notify: (q) => notified.push(q),
+    wait: async (id) => ({ answer: "separate_section" }),
+  };
+  const src = [
+    'export const meta = { name: "hl" };',
+    'return await human("Scope?", { id: "scope", choices: ["include", "exclude", "separate_section"] });',
+  ].join("\n");
+  const r1 = await runWorkflowSource(src, { journal: j1, humanChannel: channel });
+  assert.equal(r1, "separate_section", "the live answer is returned");
+  assert.equal(notified.length, 1, "the channel was notified once");
+  assert.equal(notified[0].id, "human:scope#0", "question id is the journal key (human: namespace)");
+  // the choices array crosses the vm realm — compare by value, not prototype
+  assert.equal(notified[0].choices.join(","), "include,exclude,separate_section");
+  const lines = (await readFile(jpath, "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines[0].key, "human:scope#0");
+  assert.equal(lines[0].human, true);
+  assert.equal(lines[0].result, "separate_section");
+  assert.equal(lines[0].source, "live");
+
+  // resume: the answer replays from the journal — the channel is NOT consulted.
+  const j2 = new Journal(jpath, { reuse: true });
+  await j2.load();
+  let asked = 0;
+  const r2 = await runWorkflowSource(src, {
+    journal: j2,
+    humanChannel: { notify: () => asked++, wait: async () => ({ answer: "WRONG" }) },
+  });
+  assert.equal(r2, "separate_section", "--resume replays the journaled answer");
+  assert.equal(asked, 0, "the human is never re-asked on resume");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 39) channel timeout → the default, journaled with source 'default'; human()
+//     checkpoints never appear as agents in the run model.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-human2-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jpath = join(jdir, "h.workflow.jsonl");
+  const j = new Journal(jpath, { reuse: false });
+  await j.load();
+  const channel = { notify: () => {}, wait: async () => undefined }; // nobody answers
+  const r = await runWorkflowSource([
+    'export const meta = { name: "ht" };',
+    'return await human("Risky write?", { id: "write-gate", choices: ["allow", "deny"], default: "deny", timeoutMs: 10 });',
+  ].join("\n"), { journal: j, humanChannel: channel });
+  assert.equal(r, "deny", "timeout falls back to the default");
+  const run = buildRunModel({ journalPath: jpath, runDir: dir });
+  assert.equal(run.agents.length, 0, "a human checkpoint is NOT an agent");
+  assert.equal(run.checkpoints.length, 1, "…it surfaces as run.checkpoints");
+  assert.equal(run.checkpoints[0].qid, "write-gate");
+  assert.equal(run.checkpoints[0].answer, "deny");
+  assert.equal(run.checkpoints[0].source, "default");
+  await rm(dir, { recursive: true, force: true });
 }
 
 console.log("offline checks passed ✓");

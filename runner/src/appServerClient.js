@@ -140,6 +140,13 @@ export class AppServerClient extends EventEmitter {
     return this.request("thread/start", params, 60_000);
   }
 
+  // Re-attach to a persisted thread by id (the server loads its rollout from disk
+  // and resumes it). Used by sessionful-worker resume; thread-level overrides
+  // (cwd, sandbox, model, developerInstructions) ride along like thread/start.
+  resumeThread(params) {
+    return this.request("thread/resume", params, 60_000);
+  }
+
   startTurn(params) {
     return this.request("turn/start", params, 60_000);
   }

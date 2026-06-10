@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { codexAgent } from "./codexAgent.js";
 import { startCodexSession } from "./codexSession.js";
 import { tokensSpent, outputSpent } from "./meter.js";
+import { identityHash } from "./journal.js";
 
 const CAP = Math.min(16, Math.max(1, (os.cpus()?.length ?? 4) - 2));
 
@@ -142,6 +143,7 @@ export function createRuntime({
   journal = null,
   runAgent = codexAgent, // seam: injected in tests to capture resolved opts
   startSession = startCodexSession, // seam: injected in tests for sessionful workers
+  humanChannel = null, // interactive involvement: { notify(q), wait(id, {timeoutMs}) -> {answer}|undefined }
 } = {}) {
   let agentCount = 0;
   let currentPhase = null; // last phase() title; the fallback when opts.phase is unset
@@ -346,6 +348,7 @@ export function createRuntime({
       onEvent,
       journal,
       startSession,
+      humanChannel,
       nested: true,
     });
   }
@@ -353,10 +356,11 @@ export function createRuntime({
   // ── Sessionful workers (agent.start / agent.waitAny / session.*) ──────────────
   // Long-lived Codex workers the workflow can spawn, wait on, and steer with
   // follow-up turns on the SAME thread (see references/authoring.md → "Sessionful
-  // workers" and examples/sessionful-workers.workflow.js). Live-only: a session is
-  // NEVER served from the resume cache — its turns use a `sess:<id>#<turn>` journal
-  // keyspace that agent() never generates, so a --resume run re-runs sessions live
-  // (no fake thread resurrection).
+  // workers" and examples/sessionful-workers.workflow.js). Turns journal under a
+  // `sess:<id>#<turn>` keyspace that agent() never generates. Resume is WARM: on a
+  // --resume the worker re-attaches to its persisted Codex thread (thread/resume)
+  // and replays the prompt-matched completed-turn prefix free; if re-attach fails,
+  // every turn re-runs live (no fake thread resurrection). See startLiveSession.
 
   const TIMEOUT = Symbol("waitAny-timeout");
   const isRunningStatus = (s) => s === "starting" || s === "running";
@@ -365,12 +369,13 @@ export function createRuntime({
   // concurrency-slot accounting, budget/cap gating, lifecycle events, journaling,
   // and the latest snapshot. Exposes ONLY safe methods to the script (no client).
   class LiveAgentSession {
-    constructor({ id, driver, label, phase, reqModel, effort }) {
+    constructor({ id, driver, label, phase, reqModel, effort, replay = null }) {
       this.id = id;
       this.label = label;
       this.phase = phase;
       this._driver = driver;
       this._reqModel = reqModel;
+      this._replay = replay; // journaled completed turns (by index) — warm-context resume only
       this._effort = effort ?? null; // default effort for follow-up turns
       this._status = "starting";
       this._turnCount = 0;
@@ -403,6 +408,40 @@ export function createRuntime({
       const turnIndex = this._turnCount++;
       const sessKey = `sess:${this.id}#${turnIndex}`; // journal/event id (never a resume key)
       const effort = turnOpts.effort ?? this._effort ?? undefined;
+
+      // Warm-context resume: this turn already completed in a prior run AND the
+      // worker is re-attached to its persisted thread (which holds the turn's
+      // context) — replay the journaled result free instead of re-running it.
+      // Positional like the one-shot occurrence counters, BUT also prompt-checked:
+      // the cached entry stores the prompt's identityHash, and we only replay when
+      // the current prompt matches (a changed/conditional steer — e.g. one built
+      // from an edited human() answer — must NOT serve the stale result). The first
+      // mismatch invalidates the rest of the prefix too: once a turn runs live, the
+      // thread context diverges from what the later cached turns assumed, so they
+      // must re-run as well (mirrors the contiguous-completed-prefix rule at start).
+      const cached = this._replay ? this._replay[turnIndex] : undefined;
+      const promptMatches = cached && cached.promptHash != null && cached.promptHash === identityHash(prompt);
+      if (cached && !promptMatches) {
+        this._replay = null; // diverged here → stop replaying; this turn + all later run live
+        onLog?.(`  ⊝ ${kind === "steer" ? "steer" : "agent.start"} (prompt changed — re-running live): ${this.label}`);
+      }
+      if (cached && promptMatches) {
+        this._status = "completed";
+        this._settled = true;
+        this._snapshot = {
+          id: this.id, label: this.label, phase: this.phase,
+          threadId: this._driver.threadId, turnId: null,
+          status: "completed", result: cached.result ?? null,
+          text: typeof cached.result === "string" ? cached.result : null, error: null,
+          model: cached.model ?? this._reqModel, effort: cached.effort ?? effort ?? null,
+          tokens: cached.tokens ?? null, ms: cached.ms ?? null,
+        };
+        onLog?.(`  ◦ ${kind === "steer" ? "steer" : "agent.start"} (cached): ${this.label}`);
+        onEvent?.({ type: "cached", id: sessKey, label: this.label, phase: this.phase, kind: "session", sessionId: this.id, turn: turnIndex });
+        this._completion = Promise.resolve({ ...this._snapshot });
+        release(); // the caller's slot — a replayed turn does no model work
+        return;
+      }
 
       let begun;
       try {
@@ -447,7 +486,7 @@ export function createRuntime({
           outcome = { status: "failed", error: String(e?.message ?? e), turnId: begun.turnId };
         }
         try {
-          return await this._settleTurn(outcome, { sessKey, turnIndex, effort });
+          return await this._settleTurn(outcome, { sessKey, turnIndex, effort, promptHash: identityHash(prompt) });
         } finally {
           release(); // free the slot held for THIS turn (exactly once)
         }
@@ -456,7 +495,7 @@ export function createRuntime({
 
     // Fold a turn outcome into the snapshot, emit the terminal event, and journal it
     // (observability only). Never throws, so the completion promise never rejects.
-    async _settleTurn(outcome, { sessKey, turnIndex, effort }) {
+    async _settleTurn(outcome, { sessKey, turnIndex, effort, promptHash }) {
       this._settled = true;
       const snapStatus =
         outcome.status === "completed" ? "completed" :
@@ -483,7 +522,8 @@ export function createRuntime({
           await journal.record(sessKey, this.label, this._snapshot.result ?? this._snapshot.text ?? null, {
             phase: this.phase, effort: effort ?? null, model: this._snapshot.model,
             tokens: this._snapshot.tokens, ms: this._snapshot.ms,
-            session: true, turn: turnIndex, status: snapStatus,
+            session: true, sessionId: this.id, turn: turnIndex, status: snapStatus,
+            threadId: this._driver.threadId ?? null, promptHash: promptHash ?? null,
           });
         } catch {}
       }
@@ -551,6 +591,24 @@ export function createRuntime({
     const reqModel = pinnedModel ?? opts.model ?? defaultModel ?? null;
     const id = `s${++sessionSeq}`;
 
+    // Warm-context resume (--resume): a prior run journaled this worker's turns
+    // under sess:<id>#<n> with its Codex thread id. Collect the completed-turn
+    // prefix (replay candidates) and the thread to re-attach. Replay is only valid
+    // if re-attach SUCCEEDS — a fresh thread never saw those prompts, so on a
+    // failed re-attach every turn re-runs live (no fake thread resurrection).
+    let replayPrefix = null;
+    let resumeThreadId = null;
+    if (journal && journal.reuse) {
+      const prefix = [];
+      for (let t = 0; ; t++) {
+        const e = journal.entry(`sess:${id}#${t}`);
+        if (!e) break;
+        if (e.threadId) resumeThreadId = e.threadId;
+        if (e.status === "completed" && prefix.length === t) prefix.push(e);
+      }
+      if (prefix.length) replayPrefix = prefix;
+    }
+
     // Each turn is one unit of model work: count it and gate on budget, then hold a
     // concurrency slot for the WHOLE turn (a detached running turn occupies the cap).
     bumpAgentCount();
@@ -559,13 +617,14 @@ export function createRuntime({
 
     let driver;
     try {
-      driver = await startSession({ ...merged, defaultModel, pinnedModel, log: onLog });
+      driver = await startSession({ ...merged, defaultModel, pinnedModel, log: onLog, resumeThreadId: resumeThreadId ?? undefined });
     } catch (e) {
       release();
       throw e;
     }
 
-    const session = new LiveAgentSession({ id, driver, label, phase, reqModel, effort });
+    const replay = driver.resumed && replayPrefix ? replayPrefix : null;
+    const session = new LiveAgentSession({ id, driver, label, phase, reqModel, effort, replay });
     openSessions.add(session);
     try {
       await session._beginTurn(prompt, { schema: opts.schema, effort, timeoutMs: opts.timeoutMs }, "start");
@@ -662,6 +721,59 @@ export function createRuntime({
     return { session: winner, index: list.indexOf(winner), snapshot: winner.poll(), pendingSessions: open.slice(1), timedOut: false };
   }
 
+  // ── human(question, opts?) — the `interactive` involvement mode ─────────────
+  // A declared fork: the workflow pauses HERE (and only here) for a human answer.
+  // Resolution order (first hit wins):
+  //   1. --plan                      → the default, immediately (plan never blocks)
+  //   2. args.checkpointAnswers[id]  → the documented resume convention
+  //   3. journal replay (--resume)   → a previously-given answer replays free
+  //   4. the live channel            → viewer/CLI answer (humanChannel), up to timeoutMs
+  //   5. the default                 → hands_off degradation; never blocks without a channel
+  // Answers are journaled under a `human:<id>#<occ>` key (a namespace agent() never
+  // generates), so a --resume run replays them — and the run stays reproducible.
+  let humanSeq = 0; // counts ONLY id-less calls, so an explicit-id call before an
+                    // anonymous one doesn't shift the anon q-number across runs
+  const humanOcc = new Map(); // qid -> next occurrence index
+  async function human(question, opts = {}) {
+    const choices = Array.isArray(opts.choices) && opts.choices.length ? opts.choices.map(String) : null;
+    const def = opts.default !== undefined ? opts.default : choices ? choices[0] : null;
+    const qid = opts.id != null ? String(opts.id) : `q${++humanSeq}`;
+    if (plan) return def;
+    const pre = args && args.checkpointAnswers && Object.prototype.hasOwnProperty.call(args.checkpointAnswers, qid)
+      ? args.checkpointAnswers[qid] : undefined;
+    const occ = humanOcc.get(qid) ?? 0;
+    humanOcc.set(qid, occ + 1);
+    const key = `human:${qid}#${occ}`;
+    if (pre !== undefined) {
+      onLog?.(`  ⊟ human (${qid}): answered from args.checkpointAnswers`);
+      if (journal) { try { await journal.record(key, qid, pre, { human: true, question: String(question), source: "args" }); } catch {} }
+      return pre;
+    }
+    if (journal && journal.reuse && journal.hit(key)) {
+      onLog?.(`  ⊟ human (${qid}): answer replayed from the journal`);
+      onEvent?.({ type: "cached", id: key, label: qid, kind: "human" });
+      return journal.get(key);
+    }
+    if (humanChannel) {
+      const payload = { id: key, qid, question: String(question), choices, default: def ?? null };
+      onLog?.(`  ⊟ human (${qid}): waiting for an answer — ${String(question).slice(0, 80)}`);
+      onEvent?.({ type: "question", id: key, label: qid, kind: "human", question: payload.question, choices, default: payload.default });
+      try { humanChannel.notify(payload); } catch {}
+      let got;
+      try { got = await humanChannel.wait(key, { timeoutMs: opts.timeoutMs ?? 600_000 }); } catch {}
+      if (got && got.answer !== undefined) {
+        onLog?.(`  ⊟ human (${qid}): answered`);
+        onEvent?.({ type: "answered", id: key, label: qid, kind: "human" });
+        if (journal) { try { await journal.record(key, qid, got.answer, { human: true, question: String(question), source: "live" }); } catch {} }
+        return got.answer;
+      }
+      onEvent?.({ type: "answered", id: key, label: qid, kind: "human", timedOut: true });
+    }
+    onLog?.(`  ⊟ human (${qid}): no answer — using the default${def == null ? " (null)" : ""}`);
+    if (journal) { try { await journal.record(key, qid, def, { human: true, question: String(question), source: "default" }); } catch {} }
+    return def;
+  }
+
   // Close any sessions the workflow left open (cancels their active turn + cleans
   // worktrees). Called by runWorkflowSource in a finally — NEVER exposed to the script.
   async function finalize() {
@@ -674,5 +786,5 @@ export function createRuntime({
   agent.start = (prompt, opts) => (plan ? startPlannedSession(prompt, opts) : startLiveSession(prompt, opts));
   agent.waitAny = (sessions, opts) => (plan ? waitAnyPlanned(sessions, opts) : waitAnyLive(sessions, opts));
 
-  return { agent, parallel, pipeline, phase, log, budget, args, workflow, CAP, finalize };
+  return { agent, parallel, pipeline, phase, log, budget, args, workflow, human, CAP, finalize };
 }

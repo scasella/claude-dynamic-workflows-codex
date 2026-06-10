@@ -39,13 +39,19 @@ const pct = (n) => (n == null ? null : Math.round(n * 100) + "%");
 // splits "recorded → ok / null" so the null count never reads as additive.
 function agentBreakdown(c) {
   const parts = [];
-  if (c.nullResults || c.interruptedAgents) {
+  // Reconcile to journaledAgents: only say "N completed" when EVERY recorded agent
+  // actually completed. Any non-completed recorded entry (genuine null, a cancelled
+  // or interrupted session turn) forces the explicit "recorded / ok / …" split, so
+  // the word "completed" is never attached to a count that includes a failed turn.
+  if (c.completedAgents < c.journaledAgents || c.interruptedAgents) {
     parts.push(`${c.journaledAgents} recorded`, `${c.completedAgents} ok`);
     if (c.nullResults) parts.push(`${c.nullResults} null`);
   } else {
     parts.push(`${c.journaledAgents} completed`);
   }
-  if (c.interruptedAgents) parts.push(`${c.interruptedAgents} interrupted`);
+  if (c.cancelledTurns) parts.push(`${c.cancelledTurns} cancelled`); // race losers — by design
+  if (c.interruptedTurns) parts.push(`${c.interruptedTurns} interrupted`); // session turns interrupted (not by us)
+  if (c.interruptedAgents) parts.push(`${c.interruptedAgents} unfinished`); // started, never settled (killed run)
   if (c.cachedAgents) parts.push(`${c.cachedAgents} cached`);
   return parts.join(" · ");
 }
@@ -70,10 +76,24 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
   const events = readEvents(journalPath); // null when no sidecar
   const meta = readRunMeta(journalPath); // null when no sidecar
 
+  // ── sessionful workers (per-worker rollups from the run model) ──
+  const sessions = run.sessions || [];
+  const sessionTurns = sessions.reduce((s, w) => s + w.turns.length, 0);
+  const steerTurns = sessions.reduce((s, w) => s + Math.max(0, w.turns.length - 1), 0);
+  const cancelledTurns = sessions.reduce((s, w) => s + w.turns.filter((t) => t.status === "cancelled").length, 0);
+  const failedTurns = sessions.reduce((s, w) => s + w.turns.filter((t) => t.status === "failed").length, 0);
+  // A session turn journaled "interrupted" (settled, not cancelled-by-us) — distinct
+  // from event-derived interruptedAgents (started, never settled). Both are by-design
+  // nulls; counted so the agent breakdown reconciles to journaledAgents.
+  const interruptedTurns = sessions.reduce((s, w) => s + w.turns.filter((t) => t.status === "interrupted").length, 0);
+  // A cancelled/interrupted session turn returns null BY DESIGN (races cut their
+  // losers) — keep those out of the null-result reliability signal.
+  const isExpectedNull = (a) => a.kind === "session" && (a.turnStatus === "cancelled" || a.turnStatus === "interrupted");
+
   // ── per-agent classification ──
   const journaled = agents.length;
-  const nullResults = agents.filter((a) => a.result == null).length;
-  const completed = journaled - nullResults;
+  const nullResults = agents.filter((a) => a.result == null && !isExpectedNull(a)).length;
+  const completed = journaled - agents.filter((a) => a.result == null).length;
   const withTokens = agents.filter((a) => typeof a.tokens === "number").length;
   const withMs = agents.filter((a) => typeof a.ms === "number").length;
   const totalTokens = agents.reduce((s, a) => s + (a.tokens || 0), 0);
@@ -84,7 +104,7 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
   const phaseWall = new Map(); // phase -> { minStart, maxEnd }
   if (events) {
     const ls = liveState(events);
-    cachedAgents = events.filter((e) => e.type === "cached").length;
+    cachedAgents = events.filter((e) => e.type === "cached" && e.kind !== "human").length; // human() replays aren't agents
     executedThisRun = events.filter((e) => e.type === "start").length;
     interruptedAgents = ls ? ls.running.length : 0; // started, never ended → the run is over, so: interrupted
     runWallMs = ls && ls.runStartedAt != null && ls.lastEventAt != null ? ls.lastEventAt - ls.runStartedAt : null;
@@ -140,12 +160,14 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
   const byEffort = [...effortMap.values()].sort((a, b) => b.agents - a.agents);
 
   // ── top N (only agents that carry the metric) ──
+  // Session turns share their worker's label — disambiguate with the turn index.
+  const displayLabel = (a) => (a.kind === "session" && a.turn != null ? `${a.label} · t${a.turn}` : a.label);
   const topByTokens = agents.filter((a) => typeof a.tokens === "number")
     .sort((a, b) => b.tokens - a.tokens).slice(0, 10)
-    .map((a) => ({ label: a.label, phase: a.phase, model: a.model || null, tokens: a.tokens }));
+    .map((a) => ({ label: displayLabel(a), phase: a.phase, model: a.model || null, tokens: a.tokens }));
   const topByMs = agents.filter((a) => typeof a.ms === "number")
     .sort((a, b) => b.ms - a.ms).slice(0, 10)
-    .map((a) => ({ label: a.label, phase: a.phase, model: a.model || null, ms: a.ms }));
+    .map((a) => ({ label: displayLabel(a), phase: a.phase, model: a.model || null, ms: a.ms }));
 
   // ── budget usage (only when the meta sidecar carries a ceiling) ──
   // The ceiling applies to a SINGLE run's spend (the meter resets each invocation).
@@ -197,6 +219,10 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
   }
   if (interrupted > 0) {
     warn("interrupted-agents", `${interrupted} agent(s) started but never finished in the most recent run (interrupted, failed, or killed). Resume to complete them — finished agents replay free.`);
+  }
+  // sessionful workers: failed turns are a real reliability signal (cancelled is not)
+  if (failedTurns > 0) {
+    warn("session-turn-failures", `${failedTurns} session turn(s) FAILED — check the worker snapshots' error fields. Sessions are live-only: a --resume re-runs them (one-shot agents still replay free).`);
   }
   // unphased
   const unphased = agents.filter((a) => isUnphased(a.phase)).length;
@@ -252,7 +278,17 @@ export function summarizeRun({ journalPath, scriptPath = null, runDir = null, ti
       cachedAgents,
       interruptedAgents,
       phases: byPhase.length,
+      sessionWorkers: sessions.length,
+      sessionTurns,
+      steerTurns,
+      cancelledTurns,
+      failedTurns,
+      interruptedTurns,
     },
+    sessions: sessions.map((w) => ({
+      id: w.id, label: w.label, phase: w.phase, model: w.model || null,
+      turns: w.turns.length, tokens: w.tokens || null, ms: w.ms || null, status: w.status,
+    })),
     metrics: {
       hasMetrics: !!(run.totals && run.totals.hasMetrics),
       agentsWithTokens: withTokens,
@@ -312,6 +348,11 @@ export function renderSummaryText(s, { includeResult = false } = {}) {
   // headline counts
   const c = s.counts, m = s.metrics;
   L.push("  " + padE("Agents", 12) + agentBreakdown(c));
+  if (c.sessionWorkers) {
+    L.push("  " + padE("Workers", 12) +
+      `${c.sessionWorkers} sessionful (${c.sessionTurns} turn${c.sessionTurns === 1 ? "" : "s"}` +
+      (c.steerTurns ? `, ${c.steerTurns} steer${c.steerTurns === 1 ? "" : "s"}` : "") + ")");
+  }
   L.push("  " + padE("Phases", 12) + String(c.phases));
   const resumed = m.executedTokens != null && m.executedTokens !== m.totalTokens;
   if (m.totalTokens) L.push("  " + padE("Tokens", 12) + `${fmtTokens(m.totalTokens)}   (${m.totalTokens.toLocaleString()})${resumed ? "  all-in across resumes" : ""}`);
@@ -334,6 +375,16 @@ export function renderSummaryText(s, { includeResult = false } = {}) {
       L.push("  " + truncE(p.phase, 16) + padS(String(p.agents), 7) +
         padS(fmtTokens(p.tokens) ?? "·", 10) + padS(fmtMs(p.agentMs) ?? "·", 12) +
         (hasWall ? padS(p.wallMs != null ? fmtMs(p.wallMs) : "·", 9) : ""));
+    }
+  }
+
+  // sessionful workers: one row per worker (turns folded; cost is the warm-thread total)
+  if (s.sessions && s.sessions.length) {
+    L.push(""); L.push(section("Sessionful workers"));
+    L.push("  " + padE("WORKER", 18) + padE("PHASE", 14) + padS("TURNS", 6) + padS("TOKENS", 9) + padS("TIME", 9) + "  STATUS");
+    for (const w of s.sessions) {
+      L.push("  " + truncE(w.label, 18) + truncE(w.phase ?? "", 14) + padS(String(w.turns), 6) +
+        padS(fmtTokens(w.tokens) ?? "·", 9) + padS(fmtMs(w.ms) ?? "·", 9) + "  " + w.status);
     }
   }
 
@@ -419,6 +470,7 @@ export function renderSummaryMarkdown(s, { includeResult = false } = {}) {
   L.push("| Metric | Value |");
   L.push("| :--- | :--- |");
   L.push(`| Agents | ${agentBreakdown(c)} |`);
+  if (c.sessionWorkers) L.push(`| Workers | ${c.sessionWorkers} sessionful (${c.sessionTurns} turns${c.steerTurns ? `, ${c.steerTurns} steers` : ""}) |`);
   L.push(`| Phases | ${c.phases} |`);
   const resumed = m.executedTokens != null && m.executedTokens !== m.totalTokens;
   if (m.totalTokens) L.push(`| Tokens | ${fmtTokens(m.totalTokens)} (${m.totalTokens.toLocaleString()})${resumed ? ", all-in across resumes" : ""} |`);
@@ -435,6 +487,14 @@ export function renderSummaryMarkdown(s, { includeResult = false } = {}) {
     L.push(`| :--- | ---: | ---: | ---:${hasWall ? " | ---:" : ""} |`);
     for (const p of s.byPhase) {
       L.push(`| ${p.phase} | ${p.agents} | ${fmtTokens(p.tokens) ?? "·"} | ${fmtMs(p.agentMs) ?? "·"}${hasWall ? ` | ${p.wallMs != null ? fmtMs(p.wallMs) : "·"}` : ""} |`);
+    }
+  }
+  if (s.sessions && s.sessions.length) {
+    L.push("", "## Sessionful workers", "");
+    L.push("| Worker | Phase | Turns | Tokens | Time | Status |");
+    L.push("| :--- | :--- | ---: | ---: | ---: | :--- |");
+    for (const w of s.sessions) {
+      L.push(`| \`${w.label}\` | ${w.phase ?? ""} | ${w.turns} | ${fmtTokens(w.tokens) ?? "·"} | ${fmtMs(w.ms) ?? "·"} | ${w.status} |`);
     }
   }
   if (s.topByTokens.length) {
@@ -481,6 +541,7 @@ export function renderEndOfRun(s, { reportCmd = null } = {}) {
   const m = s.metrics;
   const totals = [
     `${s.counts.journaledAgents} agent${s.counts.journaledAgents === 1 ? "" : "s"}`,
+    s.counts.sessionWorkers ? `${s.counts.sessionWorkers} worker${s.counts.sessionWorkers === 1 ? "" : "s"}` : null,
     s.counts.phases > 1 ? `${s.counts.phases} phases` : null,
     m.totalTokens ? fmtTokens(m.totalTokens) + " tok" : null,
     m.runWallMs ? fmtMs(m.runWallMs) : (m.totalAgentMs ? fmtMs(m.totalAgentMs) + " agent-time" : null),

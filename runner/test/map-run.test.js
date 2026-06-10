@@ -237,4 +237,107 @@ const plain = (s) => s.replace(/\x1b\[[0-9;]*m/g, ""); // strip ANSI for asserti
   assert.match(s, /╭─ ✦ result/, "result node-box");
 }
 
+// 11) sessionful workers: turn agents group into ONE worker row with a per-turn
+//     breakdown line; cancelled race losers get the ⊘ glyph; header counts workers.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-map-sess-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jf = join(jdir, "race.workflow.jsonl");
+  await writeFile(jf, [
+    JSON.stringify({ key: "sess:s1#0", label: "oracle", result: { summary: "Repo ingested; 14 modules mapped." }, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 52000, ms: 86000, session: true, sessionId: "s1", turn: 0, status: "completed", threadId: "th-1" }),
+    JSON.stringify({ key: "sess:s1#1", label: "oracle", result: { summary: "Auth flows traced." }, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 30000, ms: 40000, session: true, sessionId: "s1", turn: 1, status: "completed", threadId: "th-1" }),
+    JSON.stringify({ key: "sess:s2#0", label: "rival", result: null, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 12000, ms: 20000, session: true, sessionId: "s2", turn: 0, status: "cancelled", threadId: "th-2" }),
+    JSON.stringify({ key: "j#0", label: "judge:final", result: { one_line_verdict: "Oracle wins." }, phase: "Judge", model: "gpt-5.5", effort: "xhigh", tokens: 90000, ms: 60000 }),
+  ].join("\n"));
+  const run = buildRunModel({ journalPath: jf, runDir: dir });
+  assert.equal(run.sessions.length, 2, "two workers grouped from turn agents");
+  assert.equal(run.sessions[0].turns.length, 2, "oracle has 2 turns");
+  assert.equal(run.sessions[0].tokens, 82000, "worker tokens = Σ turn tokens");
+  assert.equal(run.sessions[0].status, "completed");
+  assert.equal(run.sessions[1].status, "cancelled", "race loser carries its cancelled status");
+  const s = plain(renderMap(run, { color: false, width: 88 }));
+  assert.match(s, /2 workers/, "orchestrator header counts the workers");
+  assert.equal((s.match(/✓ oracle/g) || []).length, 1, "ONE row for the oracle worker, not one per turn");
+  assert.match(s, /⟳ 2 turns: ✓ 52k·1m26s → ✓ 30k·40s/, "per-turn breakdown line under the worker");
+  assert.match(s, /⊘ rival/, "cancelled worker gets the ⊘ glyph");
+  assert.match(s, /1 agent \+ 2 workers|2 workers/, "phase meta names workers");
+  assert.match(s, /Auth flows traced\./, "snippet comes from the LAST turn with a result");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 12) sessionful + live: a running steer turn (events) folds into its worker row
+//     (spinner), never a separate agent row.
+{
+  const dir = await mkdtemp(join(tmpdir(), "wf-map-sess-live-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jf = join(jdir, "warm.workflow.jsonl");
+  await writeFile(jf, JSON.stringify({ key: "sess:s1#0", label: "oracle", result: { summary: "Loaded." }, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 52000, ms: 86000, session: true, sessionId: "s1", turn: 0, status: "completed" }));
+  await writeFile(join(jdir, "warm.workflow.events.jsonl"), [
+    JSON.stringify({ t: 100, type: "start", id: "sess:s1#0", label: "oracle", phase: "Explore", model: "gpt-5.5", effort: "high", kind: "session", sessionId: "s1", turn: 0 }),
+    JSON.stringify({ t: 86100, type: "end", id: "sess:s1#0", label: "oracle", phase: "Explore", kind: "session", sessionId: "s1", turn: 0, status: "completed", tokens: 52000, ms: 86000 }),
+    JSON.stringify({ t: 90000, type: "start", id: "sess:s1#1", label: "oracle", phase: "Explore", model: "gpt-5.5", effort: "high", kind: "session", sessionId: "s1", turn: 1 }),
+  ].join("\n"));
+  const run = buildLiveRunModel({ journalPath: jf, runDir: dir });
+  assert.equal(run.sessions.length, 1, "still ONE worker with a running steer");
+  assert.equal(run.sessions[0].status, "running", "worker is running while its steer runs");
+  assert.equal(run.sessions[0].turns.length, 2, "running steer appears as turn 1");
+  assert.equal(run.sessions[0].turns[1].status, "running");
+  const s = plain(renderMap(run, { color: false, width: 88, now: 95000 }));
+  assert.equal((s.match(/oracle/g) || []).length, 1, "one worker row, no phantom second agent row");
+  assert.match(s, /⟳ 2 turns: ✓ 52k·1m26s → ● running/, "turns line shows the live steer");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 13) collapse pins workers + running units: a wide phase (>maxAgents) with a
+//     sessionful worker must STILL show the worker row (it's the headline unit),
+//     never fold it into "+N more" — matching the HTML viewer's phaseRow.
+{
+  const agents = [];
+  for (let i = 0; i < 14; i++) {
+    agents.push({ key: `a${i}#0`, label: `scan:f${i}`, result: { ok: 1 }, phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 100000, ms: 3000 });
+  }
+  // one worker (2 turns) appended last → highest order → would sort into "+N more"
+  agents.push({ key: "sess:s1#0", label: "oracle", result: { summary: "Loaded." }, phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 52000, ms: 80000, session: true, sessionId: "s1", turn: 0, status: "completed", threadId: "th-1" });
+  agents.push({ key: "sess:s1#1", label: "oracle", result: { summary: "Traced." }, phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 30000, ms: 40000, session: true, sessionId: "s1", turn: 1, status: "completed", threadId: "th-1" });
+  const dir = await mkdtemp(join(tmpdir(), "wf-map-pin-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jf = join(jdir, "wide.workflow.jsonl");
+  await writeFile(jf, agents.map((a) => JSON.stringify(a)).join("\n"));
+  const run = buildRunModel({ journalPath: jf, runDir: dir });
+  const s = plain(renderMap(run, { color: false, width: 88, maxAgents: 12 }));
+  assert.match(s, /✓ oracle/, "the worker row survives the >12-unit collapse (pinned, not folded)");
+  assert.match(s, /⟳ 2 turns:/, "the worker's per-turn breakdown line is shown");
+  assert.match(s, /\+\d+ more/, "the overflow bucket still appears for the folded one-shot agents");
+  // the +N more count must equal what was actually hidden (16 units, worker pinned)
+  const m = s.match(/\+(\d+) more/);
+  assert.ok(m && Number(m[1]) >= 1, "overflow count is positive and honest");
+  await rm(dir, { recursive: true, force: true });
+}
+
+// 14) collapse keeps a RUNNING steer visible: a wide phase with a live worker turn
+//     must not fold the worker being watched live.
+{
+  const agents = [];
+  for (let i = 0; i < 14; i++) agents.push({ key: `b${i}#0`, label: `scan:g${i}`, result: { ok: 1 }, phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 90000, ms: 3000 });
+  agents.push({ key: "sess:w1#0", label: "watcher", result: { summary: "Loaded." }, phase: "Scan", model: "gpt-5.5", effort: "high", tokens: 40000, ms: 50000, session: true, sessionId: "w1", turn: 0, status: "completed", threadId: "th-w" });
+  const dir = await mkdtemp(join(tmpdir(), "wf-map-pinlive-"));
+  const jdir = join(dir, ".workflow-journal");
+  await mkdir(jdir, { recursive: true });
+  const jf = join(jdir, "wl.workflow.jsonl");
+  await writeFile(jf, agents.map((a) => JSON.stringify(a)).join("\n"));
+  await writeFile(join(jdir, "wl.workflow.events.jsonl"), [
+    JSON.stringify({ t: 100, type: "start", id: "sess:w1#0", label: "watcher", phase: "Scan", model: "gpt-5.5", effort: "high", kind: "session", sessionId: "w1", turn: 0 }),
+    JSON.stringify({ t: 50100, type: "end", id: "sess:w1#0", label: "watcher", phase: "Scan", kind: "session", sessionId: "w1", turn: 0, status: "completed", tokens: 40000, ms: 50000 }),
+    JSON.stringify({ t: 60000, type: "start", id: "sess:w1#1", label: "watcher", phase: "Scan", model: "gpt-5.5", effort: "high", kind: "session", sessionId: "w1", turn: 1 }),
+  ].join("\n"));
+  const run = buildLiveRunModel({ journalPath: jf, runDir: dir });
+  const s = plain(renderMap(run, { color: false, width: 88, maxAgents: 12, now: 65000 }));
+  assert.match(s, /watcher/, "the running worker stays visible under collapse");
+  assert.match(s, /⟳ 2 turns: ✓ .+ → ● running/, "its live steer is shown, not folded away");
+  await rm(dir, { recursive: true, force: true });
+}
+
 console.log("map-run checks passed ✓");

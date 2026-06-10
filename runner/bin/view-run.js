@@ -13,10 +13,11 @@
 //
 // Emits a single .html file (data embedded inline) and prints its path.
 
-import { writeFileSync, statSync, renameSync } from "node:fs";
-import { join, basename, resolve } from "node:path";
+import { writeFileSync, statSync, renameSync, readFileSync, appendFileSync, existsSync } from "node:fs";
+import { join, basename, dirname, resolve } from "node:path";
 import { execFile } from "node:child_process";
-import { locateRun, buildLiveRunModel, eventsPathFor, progressPathFor, listJournalsForTarget } from "../src/runModel.js";
+import { createServer } from "node:http";
+import { locateRun, buildLiveRunModel, eventsPathFor, progressPathFor, questionsPathFor, answersPathFor, listJournalsForTarget } from "../src/runModel.js";
 
 // Write atomically so a watching browser never loads a half-written file:
 // write to a unique temp path in the same dir, then rename (atomic on POSIX).
@@ -44,7 +45,7 @@ const nowGen = () => Date.now(); // gen = wall-clock ms: monotonic enough + cros
 
 // ── args ──────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
-  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false, settle: false, list: false };
+  const out = { target: null, script: null, journal: null, outPath: null, title: null, open: false, watch: false, settle: false, list: false, serve: false, port: 0 };
   const rest = argv.slice(2);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -55,6 +56,8 @@ function parseArgs(argv) {
     else if (a === "--open") out.open = true;
     else if (a === "--watch") out.watch = true;
     else if (a === "--settle") out.settle = true; // final render: static HTML + a final sidecar so an open live page settles
+    else if (a === "--serve") out.serve = true; // live mode: serve over localhost + accept human() answers
+    else if (a === "--port") out.port = Number(rest[++i]) || 0;
     else if (a === "--list") out.list = true;
     else if (a === "-h" || a === "--help") out.help = true;
     else if (!out.target) out.target = a;
@@ -364,6 +367,36 @@ svg.edges path.arrowhead{fill:var(--arrow)}
 .xbtn{background:transparent;border:1px solid var(--border2);color:var(--muted);border-radius:7px;width:34px;height:34px;
   cursor:pointer;font-size:13px;flex:none}
 .xbtn:hover{color:var(--text);border-color:var(--green)}
+
+/* ── sessionful workers (one node per worker; turns as a strip + timeline) ── */
+.wbadge{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--purple);
+  border:1px solid var(--border2);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.turnstrip{display:flex;gap:4px;align-items:center;flex-wrap:wrap;justify-content:center}
+.tchip{width:9px;height:9px;border-radius:3px;background:var(--dim);flex:none}
+.tchip.ok{background:var(--green)}
+.tchip.cancelled{background:var(--dim);opacity:.5}
+.tchip.failed{background:var(--red)}
+.tchip.interrupted{background:var(--amber)}
+.tchip.run{background:var(--amber);animation:wfpulse 1.2s ease-in-out infinite}
+.pill.cancel{color:var(--dim)} .pill.fail{color:var(--red)} .pill.intr{color:var(--amber)}
+.dot.grey{background:var(--dim);box-shadow:none}
+.dot.red{background:var(--red);box-shadow:0 0 8px var(--red)}
+/* human() answer card (interactive cockpit — served live viewer) */
+.qcard{margin-top:8px;padding:12px 14px;border:1px solid var(--amber);border-radius:10px;background:var(--surface-hover)}
+.qhead{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.qbadge{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:#1a1206;background:var(--amber);border-radius:4px;padding:2px 7px;font-weight:700}
+.qid{font-family:var(--mono);font-size:10px;color:var(--dim)}
+.qtext{font-size:13.5px;color:var(--text);max-width:90ch}
+.qrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.qbtn{background:transparent;border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:6px 14px;font-family:var(--mono);font-size:12px;cursor:pointer;min-height:32px}
+.qbtn:hover{border-color:var(--amber);color:var(--amber)}
+.qbtn.send{border-color:var(--amber);color:var(--amber);font-weight:700}
+.qinput{background:var(--bg);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:6px 10px;font-size:12.5px;min-width:220px;font-family:var(--mono)}
+.qdef{font-family:var(--mono);font-size:10px;color:var(--dim)}
+.turncard{border-top:1px solid var(--border);padding:12px 0}
+.turncard:first-child{border-top:0;padding-top:4px}
+.turnhead{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-family:var(--mono);font-size:11px;color:var(--muted);flex-wrap:wrap}
+.turnhead .tno{color:var(--text);font-weight:700}
 `;
 
 // Client app. Keep it dependency-free; build DOM with a tiny h() so all user
@@ -396,12 +429,13 @@ const elapsedOf=(a)=>a&&a.startedAt?fmtMs(Date.now()-a.startedAt):null;
 // Built once instead of re-filtering/sorting the whole agent list on every tree,
 // map, phase-card, and metric read — cheaper for large runs and the single source
 // for phase progress/aggregate stats.
-const _agentsByPhase=new Map(), _agentById=new Map();
+const _agentsByPhase=new Map(), _agentById=new Map(), _sessionById=new Map();
 const _phaseStatsCache=new Map();
 function reindex(){
-  _agentsByPhase.clear(); _agentById.clear(); _phaseStatsCache.clear();
+  _agentsByPhase.clear(); _agentById.clear(); _sessionById.clear(); _phaseStatsCache.clear();
   RUN.agents.forEach((a)=>{ _agentById.set(a.id,a); const arr=_agentsByPhase.get(a.phase)||[]; arr.push(a); _agentsByPhase.set(a.phase,arr); });
   _agentsByPhase.forEach((arr)=>arr.sort((a,b)=>a.order-b.order));
+  (RUN.sessions||[]).forEach((s)=>_sessionById.set(s.id,s));
   computeModelColors();
 }
 reindex(); // rebuilt on every live data swap (RUN reassigned) so views read fresh
@@ -409,6 +443,47 @@ const agentsInPhase=(title)=>_agentsByPhase.get(title)||[];
 // Look agents up by their stable id (the journal key); label is display-only and
 // may repeat, so it is never used as an identity key.
 const agentById=(id)=>_agentById.get(id);
+const sessionById=(id)=>_sessionById.get(id);
+
+// ── sessionful workers ────────────────────────────────────────────────────────
+// One display UNIT per orchestration handle: a one-shot agent, or a WORKER (all
+// of its turns folded together). Turn agents stay in RUN.agents for the metric
+// math; the map/tree/phase views render units.
+function unitsInPhase(title){
+  const units=[]; const seen=new Set();
+  for(const a of agentsInPhase(title)){
+    if(a.kind==='session'&&a.sessionId){
+      if(seen.has(a.sessionId)) continue;
+      seen.add(a.sessionId);
+      const s=sessionById(a.sessionId);
+      if(s){ units.push({session:s}); continue; }
+    }
+    units.push({agent:a});
+  }
+  return units;
+}
+const sessTurnAgent=(t)=>agentById(t.id); // a turn's underlying agent entry (result/progress/startedAt)
+const sessRunningAgent=(s)=>{ for(const t of s.turns){ const a=sessTurnAgent(t); if(a&&isRunning(a)) return a; } return null; };
+function sessLastResultTurn(s){
+  for(let i=s.turns.length-1;i>=0;i--){ const a=sessTurnAgent(s.turns[i]); if(a&&a.result!=null) return a; }
+  return null;
+}
+// status chip covering the session turn states (running/completed/cancelled/failed/interrupted)
+function statusChipFor(status, startedAt){
+  if(status==='running'){
+    const pill=h('span',{class:'pill run'}, h('span',{class:'dot amber'}), 'running');
+    if(startedAt) pill.append(' · ', h('span',{'data-elapsed-start':startedAt}, fmtMs(Date.now()-startedAt)||''));
+    return pill;
+  }
+  if(status==='cancelled') return h('span',{class:'pill cancel'}, h('span',{class:'dot grey'}),'cancelled');
+  if(status==='failed') return h('span',{class:'pill fail'}, h('span',{class:'dot red'}),'failed');
+  if(status==='interrupted') return h('span',{class:'pill intr'}, h('span',{class:'dot amber'}),'interrupted');
+  return h('span',{class:'pill ok'}, h('span',{class:'dot'}),'completed');
+}
+function turnChip(t){
+  const cls=t.status==='running'?'run':t.status==='completed'?'ok':t.status;
+  return h('span',{class:'tchip '+cls,title:'turn '+t.turn+' · '+t.status+(t.tokens!=null?' · '+fmtTokens(t.tokens)+' tok':'')+(t.ms!=null?' · '+fmtMs(t.ms):'')});
+}
 function phaseStats(title){
   if(_phaseStatsCache.has(title)) return _phaseStatsCache.get(title);
   let tokens=0,ms=0,done=0,running=0; const a=agentsInPhase(title);
@@ -436,7 +511,7 @@ function saveState(){
   try{
     const main=document.querySelector('.main'), side=document.querySelector('.sidebar');
     sessionStorage.setItem(STATE_KEY, JSON.stringify({
-      theme, view, sel, collapsed, expandedPhases, drawerAgent, drawerResult,
+      theme, view, sel, collapsed, expandedPhases, drawerAgent, drawerResult, drawerSession,
       mapZoom, mapTx, mapTy, mapUserAdjusted,
       mainScroll: main?main.scrollTop:0, sideScroll: side?side.scrollTop:0,
     }));
@@ -451,7 +526,8 @@ function loadState(){
     if(s.collapsed) Object.assign(collapsed,s.collapsed);
     if(s.expandedPhases) Object.assign(expandedPhases,s.expandedPhases);
     drawerAgent = s.drawerAgent && RUN.agents.some(a=>a.id===s.drawerAgent) ? s.drawerAgent : null;
-    drawerResult = !drawerAgent && !!s.drawerResult && RUN.result!==undefined && RUN.result!==null;
+    drawerSession = !drawerAgent && s.drawerSession && (RUN.sessions||[]).some(w=>w.id===s.drawerSession) ? s.drawerSession : null;
+    drawerResult = !drawerAgent && !drawerSession && !!s.drawerResult && RUN.result!==undefined && RUN.result!==null;
     if(typeof s.mapZoom==='number'){ mapZoom=s.mapZoom; mapTx=s.mapTx; mapTy=s.mapTy; mapUserAdjusted=!!s.mapUserAdjusted; }
     __restoreScroll={main:s.mainScroll||0, side:s.sideScroll||0};
   }catch(e){}
@@ -566,7 +642,24 @@ function buildTree(){
     t.append(pn);
     if(!isCol){
       const wrap=h('div',{class:'children'});
-      kids.forEach(a=>{
+      unitsInPhase(p.title).forEach(u=>{
+        if(u.session){
+          const s=u.session;
+          const lbl=s.label.includes(':')?s.label.split(':').slice(1).join(':')||s.label:s.label;
+          const n=node({type:'session',id:s.id},'',lbl+' ⟳'+s.turns.length,null,'agent',false,null,s.status==='running');
+          n.append(sessionTreeMeta(s));
+          wrap.append(n);
+          const tw=h('div',{class:'children'});
+          s.turns.forEach(tn=>{
+            const ta=sessTurnAgent(tn);
+            const m=node({type:'agent',id:tn.id},'','t'+tn.turn+' · '+tn.status,null,'agent',false,null,tn.status==='running');
+            if(ta) m.append(agentTreeMeta(ta));
+            tw.append(m);
+          });
+          wrap.append(tw);
+          return;
+        }
+        const a=u.agent;
         const lbl=a.label.includes(':')?a.label.split(':').slice(1).join(':')||a.label:a.label;
         const n=node({type:'agent',id:a.id},'',lbl,null,'agent',false,null,isRunning(a));
         n.append(agentTreeMeta(a));
@@ -584,6 +677,16 @@ function phaseTreeMeta(st){
   m.append(h('span',{},st.done+'/'+st.total));
   const frac=st.total?st.done/st.total:0;
   m.append(h('span',{class:'pbar'}, h('i',{style:{width:Math.round(frac*100)+'%'}})));
+  return m;
+}
+// inline worker metrics: aggregate turns/tokens (running worker ticks via its turn)
+function sessionTreeMeta(s){
+  const m=h('span',{class:'ameta'});
+  const ra=sessRunningAgent(s);
+  if(ra){ m.append(h('span',{class:'run'}, ra.startedAt?h('span',{'data-elapsed-start':ra.startedAt},elapsedOf(ra)||'…'):'running')); }
+  else if(s.ms) m.append(h('span',{},fmtMs(s.ms)));
+  if(s.tokens) m.append(h('span',{},fmtTokens(s.tokens)));
+  if(s.model) m.append(h('span',{class:'chip',style:{color:modelColor[s.model],borderColor:modelColor[s.model]+'55',padding:'0 6px',fontSize:'10px'}},s.model.replace('gpt-','')));
   return m;
 }
 // inline agent metrics: elapsed (running, ticks) or time, tokens, model
@@ -739,6 +842,7 @@ function renderMain(){
   if(sel.type==='run') return renderRun();
   if(sel.type==='phase') return renderPhase(RUN.phases.find(p=>p.title===sel.id));
   if(sel.type==='agent') return renderAgent(agentById(sel.id));
+  if(sel.type==='session') return renderSession(sessionById(sel.id));
   return h('div',{});
 }
 
@@ -825,7 +929,27 @@ function renderPhase(p){
   m.append(h('div',{class:'title-lg'},p.title));
   if(p.detail) m.append(h('div',{class:'sub'},p.detail));
   m.append(h('h2',{class:'sec'},'Agents'));
-  agentsInPhase(p.title).forEach(a=>{
+  unitsInPhase(p.title).forEach(u=>{
+    if(u.session){
+      const w=u.session;
+      const c=h('div',{class:'card agentcard',onclick:()=>select({type:'session',id:w.id})});
+      const top=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}});
+      top.append(h('span',{class:'label-mono',style:{fontWeight:600}},w.label));
+      top.append(h('span',{class:'wbadge'},'worker ⟳ '+w.turns.length));
+      if(w.model) top.append(h('span',{class:'chip',style:{color:modelColor[w.model],borderColor:modelColor[w.model]+'55'}},w.model));
+      if(w.tokens) top.append(h('span',{class:'pill'},fmtTokens(w.tokens)+' tok'));
+      if(w.ms) top.append(h('span',{class:'pill'},fmtMs(w.ms)));
+      const ra=sessRunningAgent(w);
+      top.append(statusChipFor(w.status, ra&&ra.startedAt));
+      c.append(top);
+      c.append(h('div',{class:'turnstrip',style:{marginTop:'8px',justifyContent:'flex-start'}},w.turns.map(turnChip)));
+      const lt=sessLastResultTurn(w);
+      const sum=lt?summarize(lt.result)||(typeof lt.result==='string'?lt.result:''):'';
+      if(sum) c.append(h('div',{class:'prose',style:{marginTop:'8px',color:'var(--muted)'}},String(sum).slice(0,300)));
+      m.append(c);
+      return;
+    }
+    const a=u.agent;
     const c=h('div',{class:'card agentcard',onclick:()=>select({type:'agent',id:a.id})});
     const top=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}});
     top.append(h('span',{class:'label-mono',style:{fontWeight:600}},a.label));
@@ -872,8 +996,63 @@ function renderAgent(a){
   return m;
 }
 
+// ── sessionful-worker panes (shared by the tree main pane and the map drawer) ──
+function sessionChips(s){
+  const chips=h('div',{class:'metarow'});
+  chips.append(h('span',{class:'wbadge'},'worker ⟳ '+s.turns.length+' turn'+(s.turns.length===1?'':'s')));
+  chips.append(h('span',{class:'pill'},'phase · '+s.phase));
+  if(s.model) chips.append(h('span',{class:'chip',style:{color:modelColor[s.model],borderColor:modelColor[s.model]+'55'}},s.model));
+  if(s.effort) chips.append(h('span',{class:'pill'},'effort · '+s.effort));
+  if(s.tokens) chips.append(h('span',{class:'pill'},fmtTokens(s.tokens)+' tok total'));
+  if(s.ms) chips.append(h('span',{class:'pill'},fmtMs(s.ms)+' total'));
+  const ra=sessRunningAgent(s);
+  chips.append(statusChipFor(s.status, ra&&ra.startedAt));
+  return chips;
+}
+// the per-turn timeline: every turn on the worker's single warm thread, in order
+function sessionTimeline(s){
+  const wrap=h('div',{});
+  s.turns.forEach(t=>{
+    const a=sessTurnAgent(t);
+    const card=h('div',{class:'turncard'});
+    const head=h('div',{class:'turnhead'});
+    head.append(h('span',{class:'tno'},'turn '+t.turn+(t.turn===0?' · start':' · steer')));
+    head.append(statusChipFor(t.status, t.status==='running'&&a?a.startedAt:null));
+    if(t.tokens!=null) head.append(h('span',{class:'pill'},fmtTokens(t.tokens)+' tok'));
+    if(t.ms!=null) head.append(h('span',{class:'pill'},fmtMs(t.ms)));
+    card.append(head);
+    if(t.status==='running'&&a){
+      if(a.progress){
+        card.append(h('div',{class:'streamlabel'},'streaming output'));
+        card.append(h('div',{class:'streamout'}, a.progress, h('span',{class:'streamcaret'})));
+      } else {
+        card.append(h('div',{class:'prose muted'},'Running — waiting for this turn’s first output…'));
+      }
+    } else if(a&&a.result!=null){
+      card.append(a.result&&typeof a.result==='object'?renderValue(a.result):h('div',{class:'prose'},String(a.result)));
+      const det=h('details',{class:'raw'}); det.append(h('summary',{},'raw json'), h('pre',{class:'json'},JSON.stringify(a.result,null,2)));
+      card.append(det);
+    } else {
+      card.append(h('div',{class:'empty'},t.status==='cancelled'?'(cancelled — no result)':t.status==='failed'?'(failed — no result)':'(no result)'));
+    }
+    wrap.append(card);
+  });
+  return wrap;
+}
+function renderSession(s){
+  if(!s) return h('div',{});
+  const m=h('div',{});
+  m.append(h('div',{class:'crumbs'}, h('a',{href:'#',onclick:(e)=>{e.preventDefault();select({type:'run'});}},RUN.name),' / ',
+    h('a',{href:'#',onclick:(e)=>{e.preventDefault();select({type:'phase',id:s.phase});}},s.phase),' / ',h('b',{},s.label)));
+  m.append(h('div',{class:'title-lg'},s.label));
+  m.append(sessionChips(s));
+  m.append(h('h2',{class:'sec'},'Turns — one warm thread, in order'));
+  m.append(h('div',{class:'card'},sessionTimeline(s)));
+  return m;
+}
+
 // ── view toggle, execution map, drawer, frame ───────────────────────────────
-let view='map', drawerAgent=null, drawerResult=false;
+let view='map', drawerAgent=null, drawerResult=false, drawerSession=null;
 const hasResult=()=>RUN.result!==undefined && RUN.result!==null;
 let mapZoom=1, mapTx=0, mapTy=0, mapUserAdjusted=false, panning=false;
 let mapEls={orch:null,result:null,phases:[],barriers:[]};
@@ -901,6 +1080,8 @@ function renderHeader(){
     : h('span',{class:'pill ok'}, h('span',{class:'dot'}), nDone+'/'+RUN.agents.length+' completed'));
   meta.append(h('span',{class:'pill'},plural(RUN.counts.phases,'phase')));
   meta.append(h('span',{class:'pill'},plural(RUN.counts.agents,'agent')));
+  const nWk=(RUN.sessions||[]).length;
+  if(nWk) meta.append(h('span',{class:'pill'},'⟳ '+plural(nWk,'worker')));
   if(hasMetrics()){
     if(RUN.totals.tokens) meta.append(h('span',{class:'pill'},fmtTokens(RUN.totals.tokens)+' tokens'));
     if(RUN.totals.ms) meta.append(h('span',{class:'pill'},fmtMs(RUN.totals.ms)+' agent-time'));
@@ -922,7 +1103,43 @@ function renderHeader(){
     if(LIVE) lb.append(h('span',{class:'lk',style:{marginLeft:'auto'}},'auto-refresh on'));
     head.append(lb);
   }
+  // human() questions awaiting an answer — the interactive cockpit. Served pages
+  // POST back; file:// pages show the terminal one-liner instead.
+  (RUN.questions||[]).filter(q=>!q.answered).forEach(q=>head.append(questionCard(q)));
   return head;
+}
+
+// per-question free-text drafts survive the live re-render (data pushes every ~1.2s)
+const __qdraft={};
+function questionCard(q){
+  const card=h('div',{class:'qcard'});
+  card.append(h('div',{class:'qhead'}, h('span',{class:'qbadge'},'needs you'), h('span',{class:'qid'},q.qid||q.id)));
+  card.append(h('div',{class:'qtext'},q.question));
+  const canPost=(typeof location!=='undefined')&&/^http/.test(location.protocol||'');
+  if(canPost){
+    const submit=(ans)=>{
+      try{
+        fetch('/answer',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:q.id,answer:ans})})
+          .then((r)=>{ if(r&&(r.ok||r.status===204)){ q.answered=true; delete __qdraft[q.id]; render(); } });
+      }catch(e){}
+    };
+    const row=h('div',{class:'qrow'});
+    (q.choices||[]).forEach(c=>row.append(h('button',{class:'qbtn',onclick:()=>submit(c)},c)));
+    const inp=h('input',{class:'qinput',type:'text',value:__qdraft[q.id]||'',
+      placeholder:(q.choices&&q.choices.length)?'or type an answer…':'type an answer…'});
+    inp.addEventListener('input',()=>{ __qdraft[q.id]=inp.value; });
+    inp.addEventListener('keydown',(e)=>{ if(e.key==='Enter'&&inp.value.trim()) submit(inp.value.trim()); });
+    const send=h('button',{class:'qbtn send',onclick:()=>{ if(inp.value.trim()) submit(inp.value.trim()); }},'Send');
+    row.append(inp,send);
+    if(q.default!=null) row.append(h('span',{class:'qdef'},'default: '+q.default));
+    card.append(row);
+  } else {
+    const j=(RUN.sources&&RUN.sources.journal)||'<journal>';
+    const cmd="echo '"+JSON.stringify({id:q.id,answer:q.default!=null?String(q.default):'YOUR ANSWER'})+"' >> "+String(j).replace(/\.jsonl$/,'')+'.answers.jsonl';
+    card.append(h('div',{class:'qtext',style:{marginTop:'8px',color:'var(--muted)'}},'This page is read-only (file://). Answer from a terminal:'));
+    card.append(h('pre',{class:'json',style:{marginTop:'6px'}},cmd));
+  }
+  return card;
 }
 function renderFooter(){
   const f=h('footer',{});
@@ -954,38 +1171,70 @@ function agentNode(a){
   return n;
 }
 function orchRow(){
+  const nW=(RUN.sessions||[]).length;
+  const kick='kicks off '+plural(RUN.counts.agents,'agent')+(nW?' ('+plural(nW,'worker')+')':'')+' across '+plural(RUN.counts.phases,'phase');
   const node=h('div',{class:'mnode endpoint orch-node'}, h('span',{class:'mlabel'},RUN.name), h('span',{class:'mendsub'},'orchestrator'),
-    h('div',{class:'mnote mnote-side'},'kicks off '+plural(RUN.counts.agents,'agent')+' across '+plural(RUN.counts.phases,'phase')));
+    h('div',{class:'mnote mnote-side'},kick));
   mapEls.orch=node;
   return h('div',{class:'mrow orch'}, h('div',{class:'mgutter'}), h('div',{class:'mcenter'}, node), h('div',{class:'mgutter'}));
 }
+// One map node per WORKER: turn-strip chips, aggregate cost, live elapsed while a
+// turn runs. Clicking opens the worker drawer (the per-turn timeline).
+function workerNode(s){
+  const running=s.status==='running';
+  const ra=sessRunningAgent(s);
+  const lt=sessLastResultTurn(s);
+  const tip='[worker · '+s.turns.length+' turns'+(s.model?' · '+s.model:'')+'] '+(running?'running · ':'')+(lt?summarize(lt.result)||s.label:s.label);
+  const open=()=>openSessionDrawer(s.id);
+  const n=h('div',{class:'mnode agent worker'+(running?' running':'')+(drawerSession===s.id?' selected':''),title:tip,role:'button',tabindex:'0',
+    'aria-label':'Worker '+s.label+', '+s.turns.length+' turns, '+s.status,
+    onclick:open, onkeydown:(e)=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();open();} }});
+  n.append(h('span',{class:'msdot'+(running?' amber':'')}));
+  n.append(h('span',{class:'mlabel'}, s.label.includes(':')?s.label.split(':').slice(1).join(':'):s.label));
+  n.append(h('span',{class:'wbadge'},'worker ⟳ '+s.turns.length));
+  if(s.model) n.append(h('span',{class:'chip mmodel',style:{color:modelColor[s.model],borderColor:modelColor[s.model]+'55'}},s.model.replace('gpt-','')));
+  n.append(h('div',{class:'turnstrip'},s.turns.map(turnChip)));
+  const stats=h('div',{class:'mstats'}); let hasStat=false;
+  if(running){ stats.append(h('span',{class:'st run'}, ra&&ra.startedAt?h('span',{'data-elapsed-start':ra.startedAt}, elapsedOf(ra)||'…'):'running')); hasStat=true; }
+  if(s.ms&&!running){ stats.append(h('span',{class:'st'},fmtMs(s.ms))); hasStat=true; }
+  if(s.tokens){ stats.append(h('span',{},fmtTokens(s.tokens))); hasStat=true; }
+  if(s.status==='cancelled'||s.status==='failed'){ stats.append(h('span',{class:'st'},s.status)); hasStat=true; }
+  if(hasStat) n.append(stats);
+  return n;
+}
 const MAP_CAP=12; // collapse a phase's agent row beyond this many nodes
 function phaseRow(p,i){
-  const all=agentsInPhase(p.title);
+  const all=unitsInPhase(p.title); // one unit per one-shot agent or worker
   const st=phaseStats(p.title);
   const expanded=expandedPhases[p.title];
-  // running-aware visible set: never fold an in-flight agent into the aggregate.
-  // Show running first, then earliest by order up to the cap; the rest collapse.
+  const unitId=(u)=>u.session?'sess:'+u.session.id:u.agent.id;
+  const unitRunning=(u)=>u.session?u.session.status==='running':isRunning(u.agent);
+  // running-aware visible set: never fold an in-flight agent OR a worker into the
+  // aggregate. Show running + workers first, then earliest by order up to the cap.
   let visible=all, hidden=[];
   if(all.length>MAP_CAP && !expanded){
     const slots=Math.max(1, MAP_CAP-1);
-    const pick=new Set(all.filter(isRunning).map(a=>a.id));
-    for(const a of all){ if(pick.size>=slots) break; pick.add(a.id); }
-    visible=all.filter(a=>pick.has(a.id));
-    hidden=all.filter(a=>!pick.has(a.id));
+    const pick=new Set(all.filter(u=>unitRunning(u)||u.session).map(unitId));
+    for(const u of all){ if(pick.size>=slots) break; pick.add(unitId(u)); }
+    visible=all.filter(u=>pick.has(unitId(u)));
+    hidden=all.filter(u=>!pick.has(unitId(u)));
   }
   // a phase whose agents haven't started yet (live runs reach it later): its width
   // isn't known until the run gets there (dynamic workflows size it at runtime), so
   // show the phase as "pending" rather than a misleading "0 parallel".
   const pending = all.length === 0;
+  const nW=all.filter(u=>u.session).length;
+  const unitNoun=nW
+    ? [all.length-nW?(all.length-nW)+(all.length-nW===1?' agent':' agents'):null, nW+(nW===1?' worker':' workers')].filter(Boolean).join(' + ')
+    : all.length+(all.length===1?' agent':' parallel');
   const gut=h('div',{class:'mgutter left'},
     h('div',{class:'plabel'}, h('span',{class:'pidx'},(i+1)), p.title),
     p.detail?h('div',{class:'pdetail'},p.detail):null,
-    h('div',{class:'pcount'}, pending ? 'pending' : st.running ? st.done+'/'+st.total+' done · '+st.running+' running' : all.length+(all.length===1?' agent':' parallel')));
+    h('div',{class:'pcount'}, pending ? 'pending' : st.running ? st.done+'/'+st.total+' done · '+st.running+' running' : unitNoun));
   if(hasMetrics()){const parts=[st.tokens?fmtTokens(st.tokens)+' tok':null,st.ms?fmtMs(st.ms):null].filter(Boolean);
     if(parts.length) gut.append(h('div',{class:'pcount'},parts.join(' · ')));}
   const nodes=h('div',{class:'mnodes'}); const els=[];
-  visible.forEach(a=>{const n=agentNode(a); els.push(n); nodes.append(n);});
+  visible.forEach(u=>{const n=u.session?workerNode(u.session):agentNode(u.agent); els.push(n); nodes.append(n);});
   if(pending){
     // placeholder so the plan's shape is visible (and edges flow through) before
     // this phase starts; the real agent nodes replace it when they spawn.
@@ -994,9 +1243,9 @@ function phaseRow(p,i){
   }
   if(hidden.length){
     // aggregate bucket (not a fake agent): hidden count + running + tokens + model mix
-    const hidRunning=hidden.filter(isRunning).length;
-    const hidTokens=hidden.reduce((s,a)=>s+(a.tokens||0),0);
-    const mods={}; hidden.forEach(a=>{if(a.model)mods[a.model]=(mods[a.model]||0)+1;});
+    const hidRunning=hidden.filter(unitRunning).length;
+    const hidTokens=hidden.reduce((s,u)=>s+((u.session?u.session.tokens:u.agent.tokens)||0),0);
+    const mods={}; hidden.forEach(u=>{const mm=u.session?u.session.model:u.agent.model; if(mm)mods[mm]=(mods[mm]||0)+1;});
     const expand=()=>{ expandedPhases[p.title]=true; render(); };
     const agg=h('div',{class:'mnode more',role:'button',tabindex:'0',title:'show '+hidden.length+' more agents in '+p.title,
       'aria-label':hidden.length+' more agents in '+p.title+(hidRunning?', '+hidRunning+' running':'')+'. Activate to expand.',
@@ -1078,6 +1327,7 @@ function renderMapFrame(){
     const up=()=>{ panning=false; frame.className='mapframe'; window.removeEventListener('pointermove',mv); window.removeEventListener('pointerup',up); };
     window.addEventListener('pointermove',mv); window.addEventListener('pointerup',up); });
   if(drawerAgent) frame.append(buildDrawer(drawerAgent));
+  else if(drawerSession) frame.append(buildSessionDrawer(drawerSession));
   else if(drawerResult) frame.append(buildResultDrawer());
   return frame;
 }
@@ -1173,6 +1423,25 @@ function buildDrawer(id){
   panel.append(body); back.append(panel);
   return back;
 }
+// worker drawer: the per-turn timeline beside the map (the map stays visible)
+function buildSessionDrawer(id){
+  const s=sessionById(id); if(!s) return h('div',{});
+  const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
+  back.append(h('div',{class:'drawer-backdrop',onclick:closeDrawer}));
+  const panel=h('div',{class:'drawer-panel'+(__suppressMotion?'':' intro'),role:'dialog','aria-modal':'true','aria-label':'Worker '+s.label});
+  const top=h('div',{class:'drawer-top'});
+  top.append(h('div',{class:'drawer-head'},
+    h('div',{}, h('div',{class:'crumbs'},s.phase), h('div',{class:'title-lg',style:{fontSize:'17px'}},s.label)),
+    h('button',{class:'xbtn',id:'drawer-close','aria-label':'Close',onclick:closeDrawer},'✕')));
+  const chips=sessionChips(s); chips.style.padding='0 18px 12px';
+  chips.append(h('a',{href:'#',class:'pill',onclick:(e)=>{e.preventDefault();view='tree';drawerSession=null;select({type:'session',id});}},'open in tree ↗'));
+  top.append(chips);
+  panel.append(top);
+  const body=h('div',{class:'drawer-body'});
+  body.append(sessionTimeline(s));
+  panel.append(body); back.append(panel);
+  return back;
+}
 // result drawer: render the workflow's actual return value (the honest output)
 function buildResultDrawer(){
   const back=h('div',{class:'drawer'+(view==='map'?' dock':''),id:'drawer'});
@@ -1194,16 +1463,20 @@ function buildResultDrawer(){
 let __drawerReturnFocus=null;
 function focusClose(){ if(typeof requestAnimationFrame!=='undefined') requestAnimationFrame(()=>{ const x=document.getElementById('drawer-close'); if(x&&x.focus) x.focus(); }); }
 function openDrawer(id){
-  __drawerReturnFocus=document.activeElement; drawerAgent=id; drawerResult=false;
+  __drawerReturnFocus=document.activeElement; drawerAgent=id; drawerResult=false; drawerSession=null;
   render(); // re-render so the node shows selected + the dock mounts consistently
   focusClose(); saveState();
 }
+function openSessionDrawer(id){
+  __drawerReturnFocus=document.activeElement; drawerSession=id; drawerAgent=null; drawerResult=false;
+  render(); focusClose(); saveState();
+}
 function openResultDrawer(){
-  __drawerReturnFocus=document.activeElement; drawerResult=true; drawerAgent=null;
+  __drawerReturnFocus=document.activeElement; drawerResult=true; drawerAgent=null; drawerSession=null;
   render(); focusClose(); saveState();
 }
 function closeDrawer(){
-  const had=drawerAgent||drawerResult; if(!had) return; drawerAgent=null; drawerResult=false;
+  const had=drawerAgent||drawerResult||drawerSession; if(!had) return; drawerAgent=null; drawerResult=false; drawerSession=null;
   render();
   if(__drawerReturnFocus&&__drawerReturnFocus.focus){ try{__drawerReturnFocus.focus();}catch(e){} } __drawerReturnFocus=null;
   saveState();
@@ -1258,7 +1531,7 @@ function render(){
 function initLive(){
   if(typeof window==='undefined'||window.__wfInit) return; window.__wfInit=true;
   window.addEventListener('keydown',(e)=>{ noteInteract();
-    if(e.key==='Escape'&&(drawerAgent||drawerResult)){ e.preventDefault(); closeDrawer(); } });
+    if(e.key==='Escape'&&(drawerAgent||drawerResult||drawerSession)){ e.preventDefault(); closeDrawer(); } });
   window.addEventListener('pointerdown',noteInteract,true);
   window.addEventListener('pagehide',saveState);
   window.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') saveState(); });
@@ -1294,9 +1567,106 @@ if (opts.settle) {
   if (opts.watch) writeSidecars(outPath, buildModel(), gen0);
   console.log(outPath);
 
+  // --serve (live cockpit): serve the page + sidecars over 127.0.0.1 and accept
+  // POST /answer for the workflow's human() questions (appended to the answers
+  // sidecar, which the runner polls). The artifact on disk stays a normal
+  // self-contained file — the server only exists while this watcher runs.
+  //
+  // Hardening (this is a localhost dev server, but a malicious webpage the user
+  // visits can still POST to 127.0.0.1, and any local process can connect):
+  //   • EXACT-name allowlist for GET — only this run's own page + sidecars, so a
+  //     co-located run's artifacts in the same dir aren't readable.
+  //   • POST /answer requires Content-Type: application/json (forces a CORS
+  //     preflight cross-origin, which we never grant) AND a same-origin Origin/
+  //     Sec-Fetch-Site when present — closes the browser-CSRF vector.
+  //   • answers are accepted ONLY for a currently-pending question id, so a forged
+  //     or guessed id can't pre-answer an unasked gate.
+  //   • EVERY request runs in try/catch (a malformed %-escape or a deleted-file
+  //     race must 400/404, never crash the process that is also the live channel).
+  let serveServer = null;
+  const openTarget = await (async () => {
+    if (!opts.serve) return outPath;
+    const dir = dirname(outPath);
+    // The only files this server may hand out: the page and its live sidecars.
+    const sb = basename(sidecarBase(outPath));
+    const ALLOW = new Map([
+      [basename(outPath), "text/html; charset=utf-8"],
+      [sb + ".gen.js", "text/javascript; charset=utf-8"],
+      [sb + ".data.js", "text/javascript; charset=utf-8"],
+    ]);
+    const sameOriginOk = (req) => {
+      const sfs = req.headers["sec-fetch-site"]; // modern browsers always send this
+      if (sfs && sfs !== "same-origin" && sfs !== "none") return false;
+      const origin = req.headers.origin; // present on cross-origin (and some same-origin) POSTs
+      if (origin) {
+        const host = req.headers.host || "";
+        try { if (new URL(origin).host !== host) return false; } catch { return false; }
+      }
+      return true;
+    };
+    const pendingIds = () => {
+      const out = new Set();
+      try {
+        for (const q of JSON.parse(readFileSync(questionsPathFor(journalPath), "utf8")) || []) {
+          if (q && q.id && !q.answered) out.add(String(q.id));
+        }
+      } catch {}
+      return out;
+    };
+    const server = createServer((req, res) => {
+      try {
+        if (req.method === "POST" && (req.url === "/answer" || req.url === "/answer/")) {
+          const ctype = String(req.headers["content-type"] || "");
+          if (!/^application\/json\b/i.test(ctype) || !sameOriginOk(req)) { res.writeHead(403).end(); return; }
+          let body = "", aborted = false;
+          req.on("data", (c) => { body += c; if (body.length > 65_536) { aborted = true; req.destroy(); } });
+          req.on("end", () => {
+            if (aborted) return;
+            try {
+              const a = JSON.parse(body);
+              if (!a || typeof a.id !== "string" || !("answer" in a)) { res.writeHead(400).end(); return; }
+              if (!pendingIds().has(a.id)) { res.writeHead(409).end(); return; } // not a currently-open question
+              appendFileSync(answersPathFor(journalPath), JSON.stringify({ id: a.id, answer: a.answer, t: Date.now() }) + "\n");
+              res.writeHead(204).end();
+            } catch { res.writeHead(400).end(); }
+          });
+          req.on("error", () => { try { res.writeHead(400).end(); } catch {} });
+          return;
+        }
+        if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405).end(); return; }
+        // GET: an EXACT allowlisted basename only (no traversal, no co-located files).
+        let name;
+        try { name = decodeURIComponent((req.url || "/").split("?")[0].replace(/^\/+/, "")); }
+        catch { res.writeHead(400).end(); return; } // malformed %-escape
+        if (!name) name = basename(outPath);
+        const mime = ALLOW.get(name);
+        const p = join(dir, name);
+        if (!mime || !existsSync(p)) { res.writeHead(404).end(); return; }
+        let data;
+        try { data = readFileSync(p); } catch { res.writeHead(404).end(); return; } // deleted-file race
+        res.writeHead(200, { "content-type": mime, "cache-control": "no-store" });
+        res.end(req.method === "HEAD" ? undefined : data);
+      } catch {
+        try { res.writeHead(500).end(); } catch {}
+      }
+    });
+    server.on("clientError", (_e, socket) => { try { socket.destroy(); } catch {} });
+    server.requestTimeout = 15_000;
+    server.headersTimeout = 10_000;
+    await new Promise((res) => server.listen(opts.port, "127.0.0.1", res));
+    serveServer = server;
+    const url = `http://127.0.0.1:${server.address().port}/${encodeURIComponent(basename(outPath))}`;
+    console.error(`⇄ serving the live viewer (answers enabled): ${url}`);
+    return url;
+  })();
+  // Release the port on a clean shutdown (run-workflow kills this child on finish).
+  if (serveServer) for (const sig of ["SIGTERM", "SIGINT"]) {
+    process.on(sig, () => { try { serveServer.close(); } catch {} process.exit(0); });
+  }
+
   if (opts.open) {
     const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-    execFile(opener, [outPath], () => {});
+    execFile(opener, [openTarget], () => {});
   }
 
   // --watch: as the journal/events grow, rewrite the data sidecars (and the HTML,
@@ -1307,11 +1677,12 @@ if (opts.settle) {
     let lastSig = "";
     const eventsPath = eventsPathFor(journalPath);
     const progressPath = progressPathFor(journalPath);
+    const questionsPath = questionsPathFor(journalPath);
     // size+mtime, not size alone: a truncate/rewrite/resume can keep byte count
     // stable while content changes, and the sidecars are rewritten in place.
     const sig = (p) => { try { const s = statSync(p); return s.size + ":" + s.mtimeMs; } catch { return "0:0"; } };
     const tick = () => {
-      const cur = sig(journalPath) + "|" + sig(eventsPath) + "|" + sig(progressPath);
+      const cur = sig(journalPath) + "|" + sig(eventsPath) + "|" + sig(progressPath) + "|" + sig(questionsPath);
       if (cur !== lastSig) {
         lastSig = cur;
         try {

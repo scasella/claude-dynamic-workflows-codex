@@ -13,9 +13,9 @@
   "bugs": "https://github.com/scasella/claude-dynamic-workflows-codex/issues",
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "node runner/test/offline.js && node runner/test/view-run.test.js && node runner/test/view-run.live.test.js && node runner/test/map-run.test.js && node runner/test/summarize-run.test.js && node runner/test/goal-lint.plan.test.js",
+    "test": "node runner/test/offline.js && node runner/test/codex-session.test.js && node runner/test/view-run.test.js && node runner/test/view-run.live.test.js && node runner/test/map-run.test.js && node runner/test/summarize-run.test.js && node runner/test/goal-lint.plan.test.js && node runner/test/claim-check.plan.test.js && node runner/test/serve.test.js",
     "doctor": "node runner/test/handshake.js",
-    "demo": "node runner/bin/view-run.js examples/demo --open",
+    "demo": "node runner/bin/view-run.js examples/incident-demo --open",
     "demo:live": "node runner/bin/demo-live.js",
     "view": "node runner/bin/view-run.js",
     "map": "node runner/bin/map-run.js",

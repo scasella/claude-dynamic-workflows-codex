@@ -1,0 +1,42 @@
+{
+  "docPath": "examples/harness-zoo/claim-check/sample-doc.md",
+  "focus": "dependencies, Node version, and the harness-zoo templates",
+  "maxClaims": 12,
+  "claims": [
+    {
+      "id": "C1",
+      "claim": "The project has zero npm dependencies (package.json's dependencies block is empty).",
+      "where": "bullet 1",
+      "evidence_needed": "package.json `dependencies` is `{}`",
+      "kind": "factual"
+    },
+    {
+      "id": "C2",
+      "claim": "The project targets Node.js 18 or newer (engines.node is \">=18\").",
+      "where": "bullet 2",
+      "evidence_needed": "package.json `engines.node`",
+      "kind": "factual"
+    },
+    {
+      "id": "C3",
+      "claim": "GoalLint runs as eleven agents (1 Parse + 7 Critique + 1 Rewrite + 1 Verify + 1 Report).",
+      "where": "bullet 3",
+      "evidence_needed": "examples/harness-zoo/goal-lint/goal-lint.workflow.js phase/agent shape",
+      "kind": "quantitative"
+    },
+    {
+      "id": "C4",
+      "claim": "The repo ships a runner/test/ suite that you run with `npm test`.",
+      "where": "bullet 5",
+      "evidence_needed": "package.json `scripts.test` and the runner/test/ directory",
+      "kind": "behavioral"
+    },
+    {
+      "id": "C5",
+      "claim": "The runner depends on the `express` package to serve the live viewer.",
+      "where": "bullet 7",
+      "evidence_needed": "package.json dependencies / any import of express in the runner",
+      "kind": "factual"
+    }
+  ]
+}

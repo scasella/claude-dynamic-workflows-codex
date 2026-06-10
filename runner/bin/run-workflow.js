@@ -17,7 +17,7 @@ import { runWorkflowFile } from "../src/runWorkflow.js";
 import { getClient, shutdownClient } from "../src/codexAgent.js";
 import { pickFrontier } from "../src/modelMap.js";
 import { Journal } from "../src/journal.js";
-import { eventsPathFor, resultPathFor, progressPathFor, runMetaPathFor } from "../src/runModel.js";
+import { eventsPathFor, resultPathFor, progressPathFor, runMetaPathFor, questionsPathFor, answersPathFor } from "../src/runModel.js";
 import { summarizeRun, renderSummaryText, renderEndOfRun } from "../src/runSummary.js";
 
 const BIN_DIR = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +38,7 @@ function parseArgs(argv) {
     plan: false,
     tui: false,
     gui: false,
+    interactive: false,
     retries: null,
     journal: undefined,
     resume: false,
@@ -65,6 +66,7 @@ function parseArgs(argv) {
     else if (a === "--tui") out.tui = true;
     else if (a === "--gui") out.gui = true;
     else if (a === "--monitor") { out.tui = true; out.gui = true; }
+    else if (a === "--interactive") out.interactive = true;
     else if (a === "--retries") out.retries = Number(rest[++i]);
     else if (a === "--journal") out.journal = rest[++i];
     else if (a === "--resume") out.resume = true;
@@ -90,8 +92,12 @@ if (opts.help || !opts.script) {
       "  [--summary | --no-summary]\n" +
       "\n" +
       "  --tui            open a live ASCII map of the run in a new terminal window\n" +
-      "  --gui            open a live HTML viewer of the run in your browser\n" +
-      "                   (--monitor opens both; each shows running + done agents live)\n" +
+      "  --gui            open a live HTML viewer of the run in your browser, served on\n" +
+      "                   localhost so the workflow's human() questions are answerable\n" +
+      "                   in the page (--monitor opens both)\n" +
+      "  --interactive    enable the human() answer channel without a monitor —\n" +
+      "                   answer from another terminal by appending to the\n" +
+      "                   <journal>.answers.jsonl sidecar\n" +
       "  --frontier       pin ALL agents to the latest frontier model (auto-detected),\n" +
       "                   overriding any per-call model in the script\n" +
       "  --pin-model M    pin ALL agents to model M, overriding any per-call model\n" +
@@ -277,6 +283,10 @@ let journalPath = null;
 if (!opts.noJournal) {
   journalPath =
     opts.journal ?? `.workflow-journal/${basename(opts.script).replace(/\.[cm]?js$/, "")}.jsonl`;
+  // The sidecars (events/meta/progress/questions) are written below with silent
+  // best-effort guards — make sure the journal dir exists FIRST, or on a fresh
+  // project they all no-op until the first journal record creates it.
+  try { mkdirSync(dirname(resolve(journalPath)), { recursive: true }); } catch {}
   if (opts.fresh) await rm(journalPath, { force: true });
   journal = new Journal(journalPath, { reuse: opts.resume });
   await journal.load();
@@ -339,6 +349,49 @@ if (!opts.noJournal) {
   };
 }
 
+// ── interactive involvement channel (the workflow's `human()` global) ─────────
+// Questions go OUT via the questions sidecar (the live viewer renders an answer
+// card; `--gui` serves the viewer over localhost so the card can POST back).
+// Answers come IN via the answers jsonl — appended by the viewer's /answer
+// endpoint, or by hand:  echo '{"id":"<id>","answer":"yes"}' >> <…>.answers.jsonl
+// Auto-enabled by --gui/--tui (a monitor is attached); --interactive forces it on
+// for headless runs you plan to answer from another terminal.
+const interactive = (opts.interactive || opts.gui || opts.tui) && !!journalPath;
+let humanChannel;
+if (interactive) {
+  const questionsPath = questionsPathFor(journalPath);
+  const answersPath = answersPathFor(journalPath);
+  try { writeFileSync(questionsPath, "[]"); } catch {}
+  try { if (!existsSync(answersPath)) writeFileSync(answersPath, ""); } catch {}
+  const questions = [];
+  const flushQuestions = () => {
+    try { const tmp = questionsPath + ".tmp"; writeFileSync(tmp, JSON.stringify(questions)); renameSync(tmp, questionsPath); } catch {}
+  };
+  const readAnswers = () => {
+    const out = new Map();
+    try {
+      for (const line of readFileSync(answersPath, "utf8").split("\n")) {
+        if (!line.trim()) continue;
+        try { const a = JSON.parse(line); if (a && a.id !== undefined) out.set(String(a.id), a); } catch {}
+      }
+    } catch {}
+    return out;
+  };
+  humanChannel = {
+    notify(q) { questions.push({ ...q, askedAt: Date.now(), answered: false }); flushQuestions(); },
+    async wait(id, { timeoutMs = 600_000 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const a = readAnswers().get(String(id));
+        const q = questions.find((x) => x.id === id);
+        if (a) { if (q) { q.answered = true; q.answer = a.answer; } flushQuestions(); return { answer: a.answer }; }
+        if (Date.now() >= deadline) { if (q) { q.answered = true; q.timedOut = true; } flushQuestions(); return undefined; }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    },
+  };
+}
+
 // --tui / --gui: open a live monitor that watches this run's journal + events as
 // it progresses — a new Terminal window with the live ASCII map (--tui) and/or the
 // HTML viewer in your browser (--gui). Spawned before the run so it's up from the
@@ -348,7 +401,9 @@ if ((opts.tui || opts.gui) && journalPath) {
   const abs = resolve(journalPath);
   try { mkdirSync(dirname(abs), { recursive: true }); if (!existsSync(abs)) writeFileSync(abs, ""); } catch {}
   if (opts.gui) {
-    guiChild = spawn("node", [join(BIN_DIR, "view-run.js"), "--journal", abs, "--watch", "--open"], { stdio: "ignore" });
+    // --serve: the live viewer is served over localhost (not file://), so its
+    // human() answer card can POST back — the interactive cockpit channel.
+    guiChild = spawn("node", [join(BIN_DIR, "view-run.js"), "--journal", abs, "--watch", "--serve", "--open"], { stdio: "ignore" });
     console.error("🖥  GUI monitor: live HTML viewer opening in your browser…");
   }
   if (opts.tui) openTuiWindow(abs);
@@ -374,6 +429,7 @@ try {
     onEvent,
     onProgress,
     journal,
+    humanChannel,
   });
   console.error("\n─── result ───");
   console.log(JSON.stringify(result ?? null, null, 2));

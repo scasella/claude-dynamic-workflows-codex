@@ -99,6 +99,34 @@ const displayLabel = (label) => (label.includes(":") ? label.split(":").slice(1)
 // fixed agent-grid columns (after the connector + status glyph)
 const GRID = { model: 7, effort: 6, tok: 6, wall: 6 };
 
+// One render row per unit of orchestration: a one-shot agent, or a sessionful
+// WORKER (all of its turns folded into one row + a per-turn breakdown line).
+// Turn agents stay in run.agents for totals; this is the display grouping.
+function phaseUnits(run, title) {
+  const ags = run.agents.filter((a) => a.phase === title).sort((a, b) => a.order - b.order);
+  const units = [];
+  const seen = new Set();
+  for (const a of ags) {
+    if (a.kind === "session" && a.sessionId) {
+      if (seen.has(a.sessionId)) continue;
+      seen.add(a.sessionId);
+      const s = (run.sessions || []).find((x) => x.id === a.sessionId);
+      if (s) { units.push({ session: s }); continue; }
+    }
+    units.push({ agent: a });
+  }
+  return units;
+}
+
+// Worker status glyph: turn-level states beyond done/running.
+function sessionGlyph(status, C, spinner) {
+  if (status === "running") return C.cyan(spinner || "⠿");
+  if (status === "completed") return C.green("✓");
+  if (status === "cancelled") return C.dim("⊘");
+  if (status === "failed") return C.yellow("✗");
+  return C.yellow("◑"); // interrupted / unknown
+}
+
 export function renderMap(run, { color = false, width = 80, maxAgents = 12, now = null, spinner = "●", snippets = true } = {}) {
   const C = makeColors(color);
   const title = (s) => C.bold(C.cyan(s));
@@ -118,8 +146,10 @@ export function renderMap(run, { color = false, width = 80, maxAgents = 12, now 
   // orchestrator node: progress strip + counts, then totals (no headline — that
   // narrative lives only in the result node).
   const strip = progressStrip(run, spinner, C);
+  const nWorkers = (run.sessions || []).length;
   const totals = [
     `${run.phases.length} phase${run.phases.length === 1 ? "" : "s"}`,
+    nWorkers ? `${nWorkers} worker${nWorkers === 1 ? "" : "s"}` : null,
     hasMetrics && run.totals.tokens ? fmtTokens(run.totals.tokens) + " tok" : null,
     hasMetrics && run.totals.ms ? fmtMs(run.totals.ms) : null,
     Object.keys(run.models).join(",") || null,
@@ -137,12 +167,18 @@ export function renderMap(run, { color = false, width = 80, maxAgents = 12, now 
   const phases = run.phases.filter((p) => run.agents.some((a) => a.phase === p.title));
   phases.forEach((p, pi) => {
     const ags = run.agents.filter((a) => a.phase === p.title).sort((a, b) => a.order - b.order);
+    const units = phaseUnits(run, p.title);
+    const nW = units.filter((u) => u.session).length;
+    const nA = units.length - nW;
     const pdone = ags.filter((a) => a.status !== "running").length;
     const prun = ags.length - pdone;
     const ptok = ags.reduce((s, a) => s + (a.tokens || 0), 0);
     const pms = ags.reduce((s, a) => s + (a.ms || 0), 0);
+    const unitNoun = nW
+      ? [nA ? `${nA} agent${nA === 1 ? "" : "s"}` : null, `${nW} worker${nW === 1 ? "" : "s"}`].filter(Boolean).join(" + ")
+      : `${ags.length} agent${ags.length === 1 ? "" : "s"}`;
     const pmeta = [
-      prun ? `${pdone} done · ${prun} running` : `${ags.length} agent${ags.length === 1 ? "" : "s"}`,
+      prun ? `${pdone} done · ${prun} running` : unitNoun,
       hasMetrics && ptok ? fmtTokens(ptok) + " tok" : null,
       hasMetrics && pms ? fmtMs(pms) : null,
     ].filter(Boolean).join(" · ");
@@ -152,20 +188,42 @@ export function renderMap(run, { color = false, width = 80, maxAgents = 12, now 
     out.push("  " + C.bold(C.cyan(lead)) + C.dim("─".repeat(ruleLen) + "  " + pmeta));
     if (hasMetrics) out.push(gridHeader(labelW, C));
 
-    const collapse = ags.length > maxAgents;
-    const shown = collapse ? ags.slice(0, maxAgents - 1) : ags;
-    shown.forEach((a, i) => {
+    // Collapse a wide phase — but never fold away a WORKER (the headline unit) or a
+    // RUNNING unit (the one being watched live), matching the HTML viewer's phaseRow.
+    // Pin those first, then fill the remaining slots by order; the rest go to "+N more".
+    const collapse = units.length > maxAgents;
+    let shown = units;
+    if (collapse) {
+      const slots = Math.max(1, maxAgents - 1);
+      const isRunningUnit = (u) => (u.session ? u.session.status === "running" : u.agent?.status === "running");
+      const pick = new Set();
+      units.forEach((u, i) => { if (u.session || isRunningUnit(u)) pick.add(i); });
+      for (let i = 0; i < units.length && pick.size < slots; i++) pick.add(i);
+      shown = units.filter((_, i) => pick.has(i));
+    }
+    shown.forEach((u, i) => {
       const last = !collapse && i === shown.length - 1;
+      const rail = last ? "      " : "  " + C.dim("│") + "   ";
+      if (u.session) {
+        const s = u.session;
+        out.push(workerRow(run, s, last ? "╰─" : "├─", labelW, C, hasMetrics, now, spinner));
+        out.push(rail + C.dim(truncW(turnsLine(s, hasMetrics), snippetW)));
+        if (snippets && s.status !== "running") {
+          const snip = sessionSnippet(run, s);
+          if (snip) for (const ln of wrapText(snip, snippetW, 2)) out.push(rail + C.dim(ln));
+        }
+        return;
+      }
+      const a = u.agent;
       out.push(agentRow(a, last ? "╰─" : "├─", labelW, C, hasMetrics, now, spinner));
       if (snippets && a.status !== "running") {
         const snip = agentSnippet(a.result);
         if (snip) {
-          const rail = last ? "      " : "  " + C.dim("│") + "   ";
           for (const ln of wrapText(snip, snippetW, 2)) out.push(rail + C.dim(ln));
         }
       }
     });
-    if (collapse) out.push("  " + C.dim("╰─ … +" + (ags.length - (maxAgents - 1)) + " more"));
+    if (collapse) out.push("  " + C.dim("╰─ … +" + (units.length - shown.length) + " more"));
 
     if (pi < phases.length - 1) {
       const next = phases[pi + 1];
@@ -217,6 +275,49 @@ function agentRow(a, conn, labelW, C, hasMetrics, now, spinner) {
     cells.push(C.dim(padStartW(fmtMs(a.ms) ?? "·", GRID.wall)));
   }
   return "  " + C.dim(conn) + glyph + " " + cells.join("  ");
+}
+
+// One sessionful-worker grid row: all turns folded into one line (aggregate
+// tokens / time), status glyph covering the turn-level states. The per-turn
+// breakdown renders on the line below (turnsLine).
+function workerRow(run, s, conn, labelW, C, hasMetrics, now, spinner) {
+  const running = s.status === "running";
+  const glyph = sessionGlyph(s.status, C, spinner);
+  const cells = [C.text(padEndW(displayLabel(s.label), labelW))];
+  cells.push(C.dim(padEndW(s.model || "", GRID.model)));
+  cells.push(s.effort ? C.effort(s.effort, padEndW(s.effort, GRID.effort)) : C.dim(padEndW("", GRID.effort)));
+  if (running) {
+    cells.push(C.dim(padStartW(s.tokens ? fmtTokens(s.tokens) : "--", GRID.tok)));
+    const turnAgent = run.agents.find((a) => a.sessionId === s.id && a.status === "running");
+    cells.push(C.dim(padStartW(now && turnAgent?.startedAt ? fmtMs(now - turnAgent.startedAt) : "·", GRID.wall)));
+  } else if (hasMetrics) {
+    cells.push(C.dim(padStartW(fmtTokens(s.tokens || null) ?? "·", GRID.tok)));
+    cells.push(C.dim(padStartW(fmtMs(s.ms || null) ?? "·", GRID.wall)));
+  }
+  return "  " + C.dim(conn) + glyph + " " + cells.join("  ");
+}
+
+// Per-turn breakdown under a worker row: "⟳ 3 turns: ✓ 52k·1m26s → ✓ 140k·5m16s → ⊘".
+const TURN_GLYPH = { completed: "✓", cancelled: "⊘", failed: "✗", interrupted: "◑", running: "●" };
+function turnsLine(s, hasMetrics) {
+  const parts = s.turns.map((t) => {
+    const g = TURN_GLYPH[t.status] ?? "?";
+    if (t.status === "running") return g + " running";
+    if (!hasMetrics || (t.tokens == null && t.ms == null)) return g + (t.status === "completed" ? "" : " " + t.status);
+    const m = [t.tokens != null ? fmtTokens(t.tokens) : null, t.ms != null ? fmtMs(t.ms) : null].filter(Boolean).join("·");
+    return g + (t.status === "completed" ? " " : " " + t.status + " ") + m;
+  });
+  return `⟳ ${s.turns.length} turn${s.turns.length === 1 ? "" : "s"}: ` + parts.join(" → ");
+}
+
+// A worker's "last message": the latest turn that produced a result.
+function sessionSnippet(run, s) {
+  for (let i = s.turns.length - 1; i >= 0; i--) {
+    const a = run.agents.find((x) => x.id === s.turns[i].id);
+    const snip = a ? agentSnippet(a.result) : null;
+    if (snip) return snip;
+  }
+  return null;
 }
 
 // Inter-phase gate rendered as a semantic, full-width row (part of the graph).

@@ -7,15 +7,21 @@ node_modules/
 *.run.data.js
 *.run.gen.js
 
-# Runtime resume journals — except the bundled demo run (kept for the viewer demo)
+# Runtime resume journals — except the bundled demo runs (kept for the viewer demo)
 .workflow-journal/
 !examples/demo/.workflow-journal/
 !examples/demo/.workflow-journal/**
+!examples/incident-demo/.workflow-journal/
+!examples/incident-demo/.workflow-journal/**
 
-# Lifecycle event sidecars (live-viewer observability) are runtime-only, never committed
+# Lifecycle event + interactive cockpit sidecars (live-viewer observability) — runtime-only
 *.events.jsonl
+*.questions.json
+*.answers.jsonl
 # Persisted workflow return value + live partial-output + run-meta sidecars —
 # runtime-only. Listed last so they override the demo-journal un-ignore above.
 *.result.json
 *.progress.json
 *.meta.json
+# …except the flagship demo's result sidecar, so the viewer's result node is honest.
+!examples/incident-demo/.workflow-journal/checkout-incident.workflow.result.json

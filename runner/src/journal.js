@@ -71,6 +71,16 @@ export class Journal {
     return this.#cache.get(key)?.result;
   }
 
+  // Full journal entry (result + meta) for a key — session resume reads the
+  // turn's status/threadId/metrics, not just the result.
+  entry(key) {
+    return this.#cache.get(key);
+  }
+
+  get reuse() {
+    return this.#reuse;
+  }
+
   // `meta` carries non-identity per-agent attribution (phase, effort, model,
   // tokens, ms) for the viewer. Only defined values are persisted, so old
   // journals and metric-less runs stay valid.

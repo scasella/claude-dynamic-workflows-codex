@@ -305,5 +305,61 @@ const ok = (m) => { n++; console.log("  ✓ " + m); };
   ok("resumed + budget + events: latest-run executed tokens vs all-in journal total");
 }
 
+// sessionful workers: per-worker rollups, steer counts, cancelled-by-design turns
+// excluded from the null-result reliability signal, failed turns warned.
+{
+  const journal = [
+    { key: "sess:s1#0", label: "oracle", phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 52_000, ms: 86_000, result: { summary: "loaded" }, session: true, sessionId: "s1", turn: 0, status: "completed" },
+    { key: "sess:s1#1", label: "oracle", phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 30_000, ms: 40_000, result: { summary: "traced" }, session: true, sessionId: "s1", turn: 1, status: "completed" },
+    { key: "sess:s2#0", label: "rival", phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 12_000, ms: 20_000, result: null, session: true, sessionId: "s2", turn: 0, status: "cancelled" },
+    { key: "sess:s3#0", label: "flaky", phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 8_000, ms: 9_000, result: null, session: true, sessionId: "s3", turn: 0, status: "failed" },
+    { key: "j#0", label: "judge:final", phase: "Judge", model: "gpt-5.5", effort: "xhigh", tokens: 90_000, ms: 60_000, result: {} },
+  ];
+  const { jpath } = writeRun("sessionful", { journal });
+  const s = summarizeRun({ journalPath: jpath });
+  assert.equal(s.counts.sessionWorkers, 3, "three workers");
+  assert.equal(s.counts.sessionTurns, 4, "four session turns");
+  assert.equal(s.counts.steerTurns, 1, "one steer (oracle's 2nd turn)");
+  assert.equal(s.counts.cancelledTurns, 1);
+  assert.equal(s.counts.failedTurns, 1);
+  assert.equal(s.counts.nullResults, 1, "cancelled turn's null is by-design — only the failed one counts");
+  const oracle = s.sessions.find((w) => w.label === "oracle");
+  assert.equal(oracle.turns, 2);
+  assert.equal(oracle.tokens, 82_000, "worker cost = Σ turn tokens");
+  assert.equal(oracle.status, "completed");
+  assert.ok(s.warnings.some((w) => w.code === "session-turn-failures"), "failed turn warns");
+  const txt = renderSummaryText(s);
+  assert.match(txt, /Workers\s+3 sessionful \(4 turns, 1 steer\)/, "workers headline line");
+  assert.match(txt, /Sessionful workers/, "workers section present");
+  assert.match(txt, /oracle .*2 .*82k.*completed/s, "oracle worker row");
+  assert.match(txt, /1 cancelled/, "cancelled surfaces in the agent breakdown");
+  assert.match(txt, /oracle · t0/, "costliest agents disambiguate turns");
+  const md = renderSummaryMarkdown(s);
+  assert.match(md, /## Sessionful workers/, "markdown workers section");
+  assert.match(md, /\| `oracle` \| Explore \| 2 \| 82k /, "markdown worker row");
+  ok("sessionful workers: rollups, steers, cancelled-by-design, failed-turn warning");
+}
+
+// an INTERRUPTED session turn (settled, status:"interrupted", null result) must not
+// be mislabeled "completed" — the breakdown reconciles to journaledAgents. Regression.
+{
+  const journal = [
+    { key: "sess:s1#0", label: "oracle", phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 40_000, ms: 50_000, result: { summary: "ok" }, session: true, sessionId: "s1", turn: 0, status: "completed" },
+    { key: "sess:s2#0", label: "rival", phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 8_000, ms: 9_000, result: null, session: true, sessionId: "s2", turn: 0, status: "interrupted" },
+    { key: "j#0", label: "judge", phase: "Judge", model: "gpt-5.5", effort: "xhigh", tokens: 50_000, ms: 30_000, result: {} },
+  ];
+  const { jpath } = writeRun("interrupted-turn", { journal });
+  const s = summarizeRun({ journalPath: jpath });
+  assert.equal(s.counts.journaledAgents, 3);
+  assert.equal(s.counts.completedAgents, 2, "the interrupted turn is NOT counted as completed");
+  assert.equal(s.counts.interruptedTurns, 1);
+  assert.equal(s.counts.nullResults, 0, "interrupted-by-design null isn't a reliability null");
+  const txt = renderSummaryText(s);
+  // must NOT say "3 completed" — it would attach 'completed' to the failed turn
+  assert.doesNotMatch(txt, /3 completed/, "never labels the interrupted turn 'completed'");
+  assert.match(txt, /3 recorded · 2 ok · 1 interrupted/, "breakdown reconciles: recorded=ok+interrupted");
+  ok("interrupted session turn: breakdown reconciles, not mislabeled completed");
+}
+
 rmSync(ROOT, { recursive: true, force: true });
 console.log(`\nsummarize-run checks passed ✓ (${n} groups)`);

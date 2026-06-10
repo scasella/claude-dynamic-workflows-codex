@@ -47,7 +47,12 @@ function smoke(htmlPath) {
     ;view='tree';render();view='map';theme='light';render();theme='dark';render();
     if(RUN.agents&&RUN.agents.length){openDrawer(RUN.agents[RUN.agents.length-1].id);closeDrawer();}
     if(typeof openResultDrawer==='function'&&RUN.result!=null){openResultDrawer();closeDrawer();view='tree';sel={type:'run'};render();}
-    globalThis.__OUT={phases:RUN.phases.length,agents:RUN.agents.length,hasResult:RUN.result!=null};`;
+    if(RUN.sessions&&RUN.sessions.length){
+      view='map';render();openSessionDrawer(RUN.sessions[0].id);closeDrawer();
+      view='tree';sel={type:'session',id:RUN.sessions[0].id};render();sel={type:'run'};render();
+    }
+    globalThis.__OUT={phases:RUN.phases.length,agents:RUN.agents.length,hasResult:RUN.result!=null,
+      sessions:(RUN.sessions||[]).length};`;
   try {
     new Function(APP + exercise)();
     return { ok: true, info: globalThis.__OUT };
@@ -111,6 +116,19 @@ const cases = [
     result: { headline: "Ship the state-preserving live viewer first",
       prioritized_changes: [{ change: "kill meta refresh", impact: "high", effort: "M" }],
       quick_wins: ["atomic writes", "ticking elapsed"] } },
+  // Sessionful workers: turn agents (sess:<id>#<turn> keys, session meta) must
+  // group into RUN.sessions worker rollups — one map node per worker, a per-turn
+  // timeline in the drawer, cancelled race losers rendered distinctly, and a
+  // still-running steer (events) folded into its worker with streaming progress.
+  { name: "sessionful", lines: [
+    J({ key: "sess:s1#0", label: "oracle", result: { summary: "Repo ingested." }, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 52000, ms: 86000, session: true, sessionId: "s1", turn: 0, status: "completed", threadId: "th-1" }),
+    J({ key: "sess:s1#1", label: "oracle", result: { summary: "Auth flows traced." }, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 30000, ms: 40000, session: true, sessionId: "s1", turn: 1, status: "completed", threadId: "th-1" }),
+    J({ key: "sess:s2#0", label: "rival", result: null, phase: "Explore", model: "gpt-5.5", effort: "high", tokens: 12000, ms: 20000, session: true, sessionId: "s2", turn: 0, status: "cancelled", threadId: "th-2" }),
+    J({ key: "j#0", label: "judge:final", result: { one_line_verdict: "Oracle wins." }, phase: "Judge", model: "gpt-5.5", effort: "xhigh", tokens: 90000, ms: 60000 }) ],
+    events: [
+      J({ t: 1000, type: "start", id: "sess:s1#2", label: "oracle", phase: "Explore", model: "gpt-5.5", effort: "high", kind: "session", sessionId: "s1", turn: 2 }),
+    ],
+    progress: { "sess:s1#2": "Now writing the exact fix…" } },
   { name: "scripted-pipeline", lines: ["x.ts", "y.ts"].flatMap((f) => [
     J({ key: "s_" + f + "#0", label: "scan:" + f, result: { findings: [] } }),
     J({ key: "v_" + f + "#0", label: "verify:" + f, result: { real: false, reason: "clean" } }) ]),
@@ -139,7 +157,7 @@ for (const c of cases) {
     r = { ok: false, err: "generate failed: " + ((e.stderr && e.stderr.toString()) || e.message) };
   }
   if (r.ok) {
-    console.log(`  ✓ ${c.name.padEnd(18)} phases=${r.info.phases} agents=${r.info.agents}${r.info.hasResult ? " · result✓" : ""}`);
+    console.log(`  ✓ ${c.name.padEnd(18)} phases=${r.info.phases} agents=${r.info.agents}${r.info.sessions ? ` workers=${r.info.sessions}` : ""}${r.info.hasResult ? " · result✓" : ""}`);
   } else {
     failed++;
     console.error(`  ✗ ${c.name}: ${String(r.err).slice(0, 300)}`);

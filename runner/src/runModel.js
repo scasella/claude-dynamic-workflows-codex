@@ -150,6 +150,22 @@ export function progressPathFor(journalPath) {
   return journalPath.replace(/\.jsonl$/i, "") + ".progress.json";
 }
 
+// Interactive involvement (`human()`): pending/answered questions, maintained by
+// the runner; the live viewer renders unanswered ones as an answer card.
+export function questionsPathFor(journalPath) {
+  return journalPath.replace(/\.jsonl$/i, "") + ".questions.json";
+}
+export function readQuestions(journalPath) {
+  const p = questionsPathFor(journalPath);
+  if (!existsSync(p)) return [];
+  try { return JSON.parse(readFileSync(p, "utf8")) || []; } catch { return []; }
+}
+// Answers appended by the viewer's serve endpoint (or by hand / a CLI one-liner):
+// one {id, answer} JSON object per line. The runner polls it to resolve human().
+export function answersPathFor(journalPath) {
+  return journalPath.replace(/\.jsonl$/i, "") + ".answers.jsonl";
+}
+
 export function readProgress(journalPath) {
   const p = progressPathFor(journalPath);
   if (!existsSync(p)) return {};
@@ -185,13 +201,22 @@ export function liveState(events) {
     const id = e.id ?? e.label;
     const c = byId.get(id) || { label: e.label, starts: 0, ends: 0, lastStartT: 0 };
     if (e.label) c.label = e.label;
-    if (e.type === "start") { c.starts++; c.lastStartT = e.t ?? c.lastStartT; c.phase = e.phase; c.model = e.model; c.effort = e.effort; }
+    if (e.type === "start") {
+      c.starts++; c.lastStartT = e.t ?? c.lastStartT; c.phase = e.phase; c.model = e.model; c.effort = e.effort;
+      // session turns carry worker identity (kind/sessionId/turn) so live viewers
+      // can attach a running steer to its worker instead of a fresh agent node.
+      if (e.kind === "session") { c.kind = "session"; c.sessionId = e.sessionId ?? null; c.turn = e.turn ?? null; }
+    }
     else if (e.type === "end" || e.type === "cached") { c.ends++; ended++; }
     byId.set(id, c);
   }
   const running = [];
   for (const [id, c] of byId) {
-    if (c.starts > c.ends) running.push({ id, label: c.label, phase: c.phase ?? null, model: c.model ?? null, effort: c.effort ?? null, startedAt: c.lastStartT, status: "running" });
+    if (c.starts > c.ends) {
+      const r = { id, label: c.label, phase: c.phase ?? null, model: c.model ?? null, effort: c.effort ?? null, startedAt: c.lastStartT, status: "running" };
+      if (c.kind === "session") { r.kind = "session"; r.sessionId = c.sessionId; r.turn = c.turn; }
+      running.push(r);
+    }
   }
   return {
     running,
@@ -199,6 +224,52 @@ export function liveState(events) {
     runStartedAt: firstT === Infinity ? null : firstT,
     lastEventAt: lastT || null,
   };
+}
+
+// Journal/event key for one sessionful-worker turn: `sess:<sessionId>#<turn>`.
+const SESS_KEY_RE = /^sess:([^#]+)#(\d+)$/;
+
+// Group the session-turn agents into per-worker rollups: run.sessions =
+// [{ id, label, phase, model, effort, order, turns, tokens, ms, status }].
+// `turns` lists each turn's agent id + status + metrics in turn order; `status`
+// is "running" while any turn is in flight, else the LAST turn's terminal status
+// (completed / cancelled / failed / interrupted). Turn agents stay in run.agents
+// (they are real units of model work — totals and budget math are unchanged);
+// this is the worker-level view both viewers and the summary render.
+function attachSessions(run) {
+  const byId = new Map();
+  for (const a of run.agents) {
+    if (a.kind !== "session" || !a.sessionId) continue;
+    const s = byId.get(a.sessionId) || {
+      id: a.sessionId, label: a.label, phase: a.phase, model: null, effort: null,
+      order: a.order, turns: [], tokens: 0, ms: 0, running: false, threadId: null,
+    };
+    if (a.label) s.label = a.label;
+    if (a.model) s.model = a.model;
+    if (a.effort != null) s.effort = a.effort;
+    if (a.threadId) s.threadId = a.threadId;
+    s.order = Math.min(s.order, a.order);
+    const running = a.status === "running";
+    s.turns.push({
+      id: a.id, turn: a.turn ?? s.turns.length,
+      status: running ? "running" : a.turnStatus || "completed",
+      tokens: a.tokens, ms: a.ms,
+    });
+    s.tokens += a.tokens || 0;
+    s.ms += a.ms || 0;
+    if (running) s.running = true;
+    byId.set(a.sessionId, s);
+  }
+  const sessions = [...byId.values()];
+  for (const s of sessions) {
+    s.turns.sort((x, y) => (x.turn ?? 0) - (y.turn ?? 0));
+    s.status = s.running ? "running" : s.turns[s.turns.length - 1]?.status ?? "completed";
+    delete s.running;
+  }
+  sessions.sort((a, b) => a.order - b.order);
+  run.sessions = sessions;
+  run.counts.sessions = sessions.length;
+  return run;
 }
 
 export function buildRunModel({ journalPath, scriptPath = null, runDir = null, title = null, generatedAt = null }) {
@@ -216,7 +287,13 @@ export function buildRunModel({ journalPath, scriptPath = null, runDir = null, t
       if (e && e.label) byKey.set(e.key ?? e.label, e);
     } catch {}
   }
-  const agentsRaw = [...byKey.values()];
+  // human() checkpoints are journaled (so --resume replays answers) but are NOT
+  // model work — keep them out of the agent list; surface them as run.checkpoints.
+  const entriesAll = [...byKey.values()];
+  const agentsRaw = entriesAll.filter((e) => !e.human);
+  const checkpoints = entriesAll
+    .filter((e) => e.human)
+    .map((e) => ({ id: e.key, qid: e.label, question: e.question ?? "", answer: e.result ?? null, source: e.source ?? null }));
 
   let meta = null;
   let specs = [];
@@ -253,7 +330,7 @@ export function buildRunModel({ journalPath, scriptPath = null, runDir = null, t
   // ms); fall back to script regex + label heuristics for older journals.
   const agents = agentsRaw.map((e, i) => {
     const spec = specFor(e.label);
-    return {
+    const a = {
       id: e.key ?? e.label, // stable identity (the journal key); label is display-only and may repeat
       label: e.label,
       order: i,
@@ -264,6 +341,18 @@ export function buildRunModel({ journalPath, scriptPath = null, runDir = null, t
       ms: typeof e.ms === "number" ? e.ms : null,
       result: e.result,
     };
+    // Sessionful worker turns: the runtime journals each turn under a
+    // `sess:<sessionId>#<turn>` key with session/sessionId/turn/status meta.
+    // Parse the key as a fallback for journals that predate the explicit fields.
+    const sessKey = typeof a.id === "string" ? a.id.match(SESS_KEY_RE) : null;
+    if (e.session || sessKey) {
+      a.kind = "session";
+      a.sessionId = e.sessionId ?? (sessKey ? sessKey[1] : null);
+      a.turn = typeof e.turn === "number" ? e.turn : sessKey ? Number(sessKey[2]) : null;
+      a.turnStatus = e.status ?? "completed";
+      if (e.threadId) a.threadId = e.threadId;
+    }
+    return a;
   });
 
   // phases in meta order, then any extra phases that appeared in the journal
@@ -278,7 +367,7 @@ export function buildRunModel({ journalPath, scriptPath = null, runDir = null, t
   const totalMs = agents.reduce((s, a) => s + (a.ms || 0), 0);
   const hasMetrics = agents.some((a) => a.tokens != null || a.ms != null);
 
-  return {
+  return attachSessions({
     name: title || (meta && meta.name) || basename(journalPath).replace(/\.workflow\.jsonl$|\.jsonl$/, ""),
     description: (meta && meta.description) || "",
     phases: phaseOrder.map((t) => {
@@ -289,10 +378,11 @@ export function buildRunModel({ journalPath, scriptPath = null, runDir = null, t
     models,
     totals: { tokens: totalTokens, ms: totalMs, hasMetrics },
     counts: { phases: phaseOrder.length, agents: agents.length },
+    checkpoints,
     result: readResult(journalPath), // the workflow's actual return value, if the runner persisted it
     sources: { journal: journalPath, script: scriptPath && existsSync(scriptPath) ? scriptPath : null, runDir },
     generatedAt: generatedAt || new Date().toISOString(),
-  };
+  });
 }
 
 // buildRunModel + the live event stream: merge agents that have started but not
@@ -309,11 +399,15 @@ export function buildLiveRunModel(opts) {
       const id = r.id ?? r.label;
       if (done.has(id)) continue; // already completed in the journal
       const phase = r.phase ?? "Agents";
-      run.agents.push({ id, label: r.label, order: order++, phase, model: r.model ?? null, effort: r.effort ?? null, tokens: null, ms: null, result: undefined, status: "running", startedAt: r.startedAt });
+      const a = { id, label: r.label, order: order++, phase, model: r.model ?? null, effort: r.effort ?? null, tokens: null, ms: null, result: undefined, status: "running", startedAt: r.startedAt };
+      if (r.kind === "session") { a.kind = "session"; a.sessionId = r.sessionId; a.turn = r.turn; }
+      run.agents.push(a);
       if (!run.phases.some((p) => p.title === phase)) run.phases.push({ title: phase, detail: "" });
     }
-    // refresh phaseOrder-derived counts
+    // refresh phaseOrder-derived counts + the worker rollups (a running steer turn
+    // must fold into its worker, not appear as a fresh agent)
     run.counts = { phases: run.phases.length, agents: run.agents.length };
+    attachSessions(run);
   }
   // attach live partial output to still-running agents (shown in the drawer).
   // Progress is keyed by id (= journal key); fall back to label for older sidecars.
@@ -321,5 +415,7 @@ export function buildLiveRunModel(opts) {
   for (const a of run.agents) {
     if (a.status === "running") { const p = prog[a.id] ?? prog[a.label]; if (p) a.progress = p; }
   }
+  // pending/answered human() questions — the live viewer renders unanswered ones
+  run.questions = readQuestions(opts.journalPath);
   return run;
 }

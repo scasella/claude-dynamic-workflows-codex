@@ -7,6 +7,18 @@
 
 const perThread = new Map(); // threadId -> { input, output, reasoning, total }
 
+// Threads re-attached via thread/resume may report a cumulative total that
+// includes PRIOR-run history. On such a thread's first notification this process,
+// capture `total - last` as a baseline and subtract it from every later reading —
+// so the meter (budget + per-turn attribution) only counts THIS process's spend.
+// If the server in fact resets totals on resume, the baseline is simply 0.
+const resumedBaseline = new Map(); // threadId -> baseline breakdown to subtract
+const pendingResumed = new Set();
+
+export function markResumedThread(threadId) {
+  if (threadId && !perThread.has(threadId)) pendingResumed.add(threadId);
+}
+
 // Normalize a TokenUsageBreakdown into a flat {input, output, reasoning, total}.
 function normalize(b) {
   if (!b || typeof b !== "object") return null;
@@ -21,7 +33,23 @@ export function recordTokenUsage(params) {
   const threadId = params?.threadId;
   const n = normalize(params?.tokenUsage?.total);
   if (!threadId || !n) return;
-  perThread.set(threadId, n);
+  if (pendingResumed.has(threadId)) {
+    pendingResumed.delete(threadId);
+    const last = normalize(params?.tokenUsage?.last) ?? { input: 0, output: 0, reasoning: 0, total: 0 };
+    resumedBaseline.set(threadId, {
+      input: Math.max(0, n.input - last.input),
+      output: Math.max(0, n.output - last.output),
+      reasoning: Math.max(0, n.reasoning - last.reasoning),
+      total: Math.max(0, n.total - last.total),
+    });
+  }
+  const base = resumedBaseline.get(threadId);
+  perThread.set(threadId, base ? {
+    input: Math.max(0, n.input - base.input),
+    output: Math.max(0, n.output - base.output),
+    reasoning: Math.max(0, n.reasoning - base.reasoning),
+    total: Math.max(0, n.total - base.total),
+  } : n);
 }
 
 // Total tokens across all threads (input + output + reasoning) — the default
@@ -48,4 +76,6 @@ export function tokensForThread(threadId) {
 
 export function resetMeter() {
   perThread.clear();
+  resumedBaseline.clear();
+  pendingResumed.clear();
 }

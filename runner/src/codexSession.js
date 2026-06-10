@@ -26,7 +26,7 @@ import {
 } from "./codexAgent.js";
 import { resolveModel } from "./modelMap.js";
 import { loadAgentType } from "./agentTypes.js";
-import { tokensForThread } from "./meter.js";
+import { tokensForThread, markResumedThread } from "./meter.js";
 
 const DEFAULT_TURN_TIMEOUT_MS = 600_000; // the Codex per-turn cap (same as one-shot)
 
@@ -79,6 +79,24 @@ export async function startCodexSession(opts = {}) {
   const model = resolveModel(requestedModel, getAvailableModels(), log);
   const threadParams = buildThreadParams({ sandbox: opts.sandbox, cwd, model, systemPrompt, personality: opts.personality });
 
+  // Warm-context resume: when a prior run journaled this worker's thread id, try
+  // re-attaching to the PERSISTED thread (thread/resume loads its rollout from
+  // disk) instead of starting cold. Falls back to a fresh thread on any failure
+  // (rollout gone, old codex, ephemeral thread) — resume is an optimization, never
+  // a correctness requirement. The caller can tell which happened via `resumed`.
+  if (opts.resumeThreadId) {
+    try {
+      const res = await client.resumeThread({ ...threadParams, threadId: opts.resumeThreadId });
+      const threadId = res?.thread?.id;
+      if (!threadId) throw new Error("thread/resume did not return thread.id");
+      markResumedThread(threadId); // don't bill prior-run history to this run's meter
+      log(`  ↻ session re-attached to thread ${threadId} (warm context)`);
+      return new CodexSessionDriver({ client, threadId, model, worktree, log, resumed: true });
+    } catch (e) {
+      log(`  ↻ thread/resume failed (${String(e?.message ?? e).slice(0, 120)}) — starting a fresh thread`);
+    }
+  }
+
   const retries = opts.retries ?? 3;
   let threadId;
   for (let attempt = 0; ; attempt++) {
@@ -108,11 +126,12 @@ export async function startCodexSession(opts = {}) {
 //     result, text, error, model, tokens, ms, turnId
 //   }
 export class CodexSessionDriver {
-  constructor({ client, threadId, model, worktree, log }) {
+  constructor({ client, threadId, model, worktree, log, resumed = false }) {
     this.client = client;
     this.threadId = threadId;
     this.model = model ?? null;
     this.currentTurnId = null;
+    this.resumed = resumed; // true when re-attached via thread/resume (warm context)
     this._worktree = worktree;
     this._log = typeof log === "function" ? log : () => {};
     this._active = false;
