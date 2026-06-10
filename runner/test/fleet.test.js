@@ -72,15 +72,24 @@ try {
   assert.equal(live.stalled, false, "a run waiting on its supervisor is not stalled");
   assert.equal(live.needsAttention, true, "a pending question IS attention-worthy");
 
-  // stalled: live pid, no pending question, no activity past the threshold
+  // stalled: live pid, no pending question, no activity past the threshold —
+  // including FILE activity (journal/progress mtimes count as activity, since a
+  // streaming agent rewrites progress while the event stream is silent)
   writeFileSync(J("stall.workflow.jsonl"), "");
   writeFileSync(J("stall.workflow.meta.json"), JSON.stringify({ pid: 1234, startedAt: T0 }));
   writeFileSync(J("stall.workflow.events.jsonl"),
     JSON.stringify({ t: NOW - 400_000, type: "start", id: "y#0", label: "dig", phase: "Dig" }) + "\n");
+  utimesSync(J("stall.workflow.jsonl"), new Date(NOW - 400_000), new Date(NOW - 400_000));
   const stall = inspectRun(J("stall.workflow.jsonl"), { now: NOW, stallAfterMs: 120_000, isAlive: () => true });
   assert.equal(stall.state, "running");
   assert.equal(stall.stalled, true);
   assert.equal(stall.needsAttention, true);
+
+  // …but a fresh progress sidecar (an agent mid-stream) clears the stall
+  writeFileSync(J("stall.workflow.progress.json"), JSON.stringify({ "y#0": "still reading files…" }));
+  const streaming = inspectRun(J("stall.workflow.jsonl"), { now: NOW, stallAfterMs: 120_000, isAlive: () => true });
+  assert.equal(streaming.stalled, false, "streaming output IS activity — no false stall during a long silent layer");
+  rmSync(J("stall.workflow.progress.json"));
 
   // resolveTargets: a dir contributes ALL journals; sidecar .jsonl files are
   // NOT runs; explicit paths pass through; duplicates collapse

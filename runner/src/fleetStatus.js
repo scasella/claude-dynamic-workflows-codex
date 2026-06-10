@@ -10,7 +10,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { listJournals, buildLiveRunModel, readRunMeta, resultPathFor } from "./runModel.js";
+import { listJournals, buildLiveRunModel, readRunMeta, resultPathFor, progressPathFor } from "./runModel.js";
 
 export function pidAlive(pid) {
   if (!pid) return false;
@@ -85,9 +85,17 @@ export function inspectRun(journalPath, { now = Date.now(), stallAfterMs = 120_0
       askedAgoMs: typeof q.askedAt === "number" ? Math.max(0, now - q.askedAt) : null,
     }));
 
-  // Stall = a live pid with no journal/event activity for stallAfterMs. A run
-  // blocked on a pending question is WAITING, not stalled — flag it as such.
-  const lastActivityAt = run.live?.lastEventAt ?? startedAt ?? null;
+  // Stall = a live pid with no observable activity for stallAfterMs. Activity is
+  // more than lifecycle events (those only fire at agent start/end — a long
+  // single layer is silent there for minutes): a STREAMING agent rewrites the
+  // progress sidecar continuously, and a completing agent appends the journal.
+  // Take the freshest of all three (floored at startedAt). A run blocked on a
+  // pending question is WAITING, not stalled — flag it as such.
+  let progressAt = 0, journalAt = 0;
+  try { const pp = progressPathFor(journalPath); if (existsSync(pp)) progressAt = statSync(pp).mtimeMs; } catch {}
+  try { journalAt = statSync(journalPath).mtimeMs; } catch {}
+  const lastActivityAt =
+    Math.max(run.live?.lastEventAt ?? 0, progressAt, journalAt, startedAt ?? 0) || null;
   const lastActivityAgoMs = lastActivityAt != null ? Math.max(0, now - lastActivityAt) : null;
   const stalled =
     state === "running" && !pendingQuestions.length && lastActivityAgoMs != null && lastActivityAgoMs > stallAfterMs;
