@@ -65,11 +65,14 @@ for the full API, the controller pattern, and the human interaction model
   blocks if the cap is saturated (like `agent()`), then returns once a slot frees.
 - **Budget:** every start/steer gates on `--budget` (same `BUDGET_EXCEEDED`); each
   turn's tokens are the per-thread cumulative delta.
-- **Resume:** sessions are **live-only / non-resumable**. `agent()` resume is
-  unchanged; a `--resume` run *re-runs* sessions live. Turns are journaled under a
-  `sess:<id>#<turn>` key for the viewer/summary but are never served from the resume
-  cache (no fake thread resurrection). True cross-run resume is possible in principle
-  via `thread/resume` (persist the `threadId`) — deliberately out of scope for v1.
+- **Resume:** sessions resume **warm**. Each turn is journaled under
+  `sess:<workerId>#<turn>` with the worker's `threadId`; on `--resume` the runtime
+  calls `thread/resume` to re-attach the persisted thread, replays the journaled
+  completed-turn prefix free (`cached` events, 0 tokens), and runs only new turns on
+  the warm context. Replay is conditional on the re-attach succeeding (otherwise all
+  turns re-run live — no fake thread resurrection) and positional (same script, same
+  session call order). A resumed thread's prior-run token history is baselined out of
+  the meter (`markResumedThread`), so budgets bill only this run's spend.
 - **Finalization:** `runWorkflowSource` closes any sessions left open in a `finally`
   (cancels active turns, removes worktrees). `isolation:'worktree'` persists across
   steers, cleaned only on `close()`/finalization.
@@ -350,22 +353,24 @@ live viewer**, the **`summarize-run` cost/performance/reliability report**
 `workflow({scriptPath} | "name")` nesting, **sessionful workers** (`agent.start` /
 `agent.waitAny` / `session.steer`/`wait`/`poll`/`cancel`/`close` — long-lived,
 multi-turn, steerable Codex threads with per-turn budget/concurrency, lifecycle
-events, runtime finalization, and worktree persistence across turns; live-only /
-non-resumable), and the CLI.
+events, runtime finalization, worktree persistence across turns, and warm-context
+resume via `thread/resume`), and the CLI.
 Validated end-to-end on real multi-phase runs (parallel schema reviewers feeding a
 consolidator), including budget-stop-then-resume. See `examples/demo/` for a
 bundled sample run.
 
 **Extension points (not yet wired):**
 
-- **Warm-context resume** — the journal replays *results*; it does not yet reuse
-  Codex thread state via `thread/resume` / `thread/fork`. Sessionful workers
-  (`agent.start`) run *within* a process but are **live-only**: a `--resume` re-runs
-  them. `thread/resume` (persisting `threadId`s) is the path to true cross-run
-  session continuity — deliberately deferred.
-- **`interactive` involvement mode** — live human steering of running workers via the
-  viewer / a command sidecar. v1 ships `hands_off` and `checkpointed` (checkpoint by
-  structured `needs_human` return); `interactive` is documented but not built.
+- **One-shot thread forking** — `agent()` resume replays *results* (single stateless
+  turns have no state worth forking). Sessions DO resume warm (`thread/resume`, see
+  above); `thread/fork` (branching one warm worker into several) remains unexplored.
+- **Direct worker steering from the viewer** — `human()` (built) covers *declared*
+  forks: the workflow asks, the served live viewer (`view-run --serve`, auto with
+  `--gui`) renders an answer card that POSTs to `/answer`, and the runner polls the
+  `<journal>.answers.jsonl` sidecar. What remains unbuilt is UNdeclared steering —
+  injecting a turn into a running worker the script didn't offer up — which would
+  race the script's one-active-turn ownership; if ever added it needs a hand-off
+  protocol, not just an endpoint.
 - **Budget accounting across a resume** — totals are per process; `--budget-meter`
   selects total vs output (the native pool), but a `budget`-driven loop can still
   differ slightly across a resume since cached agents replay at 0 tokens.

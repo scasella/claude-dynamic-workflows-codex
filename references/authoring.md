@@ -209,10 +209,39 @@ the human re-enters only at declared checkpoints. Declare an **involvement mode*
   actions.
 - `checkpointed` — **the recommended default.** Pause only at plan / write / budget /
   scope gates.
-- `interactive` — live steering through a viewer/sidecar. *Future* — not built in v1.
+- `interactive` — pause at declared forks and take the answer **live**, via the
+  `human()` global (below). Built: the run keeps its warm workers while you answer.
 
-v1 does **not** block on live human input. When a decision genuinely needs a human,
-return a structured **checkpoint** and let the human resume:
+### `human(question, opts?) → Promise<answer>`
+
+A **declared fork**: the workflow pauses *here* (and only here) for a human answer.
+`opts`: `{ id?, choices?, default?, timeoutMs? }`. Resolution order — first hit wins:
+
+1. **`--plan`** → the default, immediately (a dry run never blocks);
+2. **`args.checkpointAnswers[id]`** → the resume convention, answered up front;
+3. **journal replay** (`--resume`) → a previously-given answer replays free;
+4. **the live channel** → with `--gui`, the served viewer shows an answer card
+   (choice buttons + free text) that POSTs back; with `--tui`/`--interactive`,
+   append to the sidecar from any terminal:
+   `echo '{"id":"human:<id>#0","answer":"yes"}' >> .workflow-journal/<name>.answers.jsonl`;
+5. **the default** after `timeoutMs` (or immediately with no channel attached) —
+   `hands_off` degradation: an unattended run never hangs.
+
+Answers journal under `human:<id>#<occ>` (never an agent key), render as
+checkpoints — not agents — in the viewer/summary, and replay on `--resume`, so an
+answered run stays reproducible. Combine with sessionful workers for the cockpit
+loop: ask, keep the fleet warm, steer with the answer.
+
+```js
+const scope = await human("Include internal admin-only routes?", {
+  id: "scope", choices: ["include", "exclude", "separate_section"],
+  default: "separate_section", timeoutMs: 600_000,
+});
+await oracle.steer(`Scope decided: ${scope}. Re-rank the findings accordingly.`);
+```
+
+For **unattended** runs (cron, CI), prefer the checkpoint-by-return shape — end the
+run with a structured question and let the human resume:
 
 ```js
 return {
@@ -233,13 +262,20 @@ prints the workflow's return value, so the human sees the question and resume hi
 
 ### Limits & resume (read this)
 
-- **Live-only / non-resumable.** `agent()` stays resumable as before. Sessions are
-  **not**: there's no live Codex thread to revive across a process exit, so a
-  `--resume` run **re-runs** any sessions live (real tokens). Session turns *are*
-  journaled (under a `sess:<id>#<turn>` key) for the viewer/summary, but that key is
-  never served from the resume cache — **no fake thread resurrection.** Workflows
-  that need to pause for a human should checkpoint-by-return (above), not rely on
-  resuming a live session.
+- **Warm-context resume.** `agent()` stays resumable as before. Sessions resume
+  **warm**: each turn is journaled under `sess:<workerId>#<turn>` with the worker's
+  Codex `threadId`; on `--resume` the runtime calls `thread/resume` to re-attach the
+  **persisted thread** (the server reloads its rollout from disk), replays the
+  journaled *completed-turn prefix* free (0 tokens, `cached` events), and runs only
+  the new turns — on the worker's full prior context. Two honesty rules: replay is
+  **conditional on a successful re-attach** (a fresh thread never saw those prompts,
+  so if the rollout is gone or codex predates `thread/resume`, every turn re-runs
+  live — **no fake thread resurrection**); and replay is **positional**, like the
+  one-shot occurrence counters — same script, same session call order. A worker's
+  prior-run token history is baselined out of the meter, so budgets bill only this
+  run. Workflows that need to pause for a human should still checkpoint-by-return
+  (above) — that composes with warm resume: return `needs_human`, then `--resume`
+  with the answer in `args` and steer the same warm worker onward.
 - **One active turn per session.** `steer()` while a turn runs throws — `wait()` or
   `cancel()` first. (v1 doesn't queue turns.)
 - **Finalization.** Sessions you leave open are closed automatically when the

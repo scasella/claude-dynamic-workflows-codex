@@ -9,6 +9,8 @@
 
 ![Execution map](docs/map-dark.png)
 
+<sub>↑ a real run: diagnose a checkout latency regression — triage the signals in parallel, **race three root-cause workers** and cancel the losers, steer the winner on its warm thread, then gate the fix. This is the bundled demo; open it yourself in 10 seconds ([below ↓](#see-it-now-no-codex-required)).</sub>
+
 You describe a task; Claude Code writes a [dynamic-workflow](https://code.claude.com/docs/en/workflows) script — `agent()` / `parallel()` / `pipeline()` / `phase()` / `budget` — and runs it across dozens of GPT-5 agents instead of Claude subagents. The runtime holds the loop, branching, and intermediate results, so your context only sees the final answer — and you watch it build as an interactive map. And unlike the native one-shot DSL, workers here can stay **live** — steer a worker on warm context, race several and cancel the losers, or let a controller adapt the plan as results land ([Beyond one-shot ↓](#beyond-one-shot-sessionful-workers)). Great for codebase audits, large migrations, cross-checked research, and idea generation.
 
 This repo is **two ways in**:
@@ -23,21 +25,24 @@ This repo is **two ways in**:
 
 ## See it now (no Codex required)
 
-Want a look at what a finished run is before installing anything? The viewer is offline and self-contained, and a sample run is bundled:
+Want a look at a finished run before installing anything? The viewer is offline and self-contained, and the flagship demo is bundled:
 
 ```bash
 git clone https://github.com/scasella/claude-dynamic-workflows-codex
 cd claude-dynamic-workflows-codex
-node runner/bin/view-run.js examples/demo --open
+node runner/bin/view-run.js examples/incident-demo --open
 ```
 
-That opens the map above — a fictional 4-phase landing-page review. Click any node for its full result; **F** frames the graph, drag to pan, scroll to zoom.
+That opens the map above — a fictional **checkout-latency incident**: a parallel triage, a **race of three sessionful root-cause workers** (the winner is steered for a confirming second turn; the two losers are cancelled, marked ⊘), and a lone fix gate. Click any node for its full result; click the **n+1 worker** to see its per-turn timeline; **F** frames the graph, drag to pan, scroll to zoom.
 
-| Dark | Light | Inspector |
-| :--- | :--- | :--- |
-| ![dark](docs/map-dark.png) | ![light](docs/map-light.png) | ![drawer](docs/drawer.png) |
+|  |  |
+| :--- | :--- |
+| **Map — the run as a DAG.** Workers carry a `⟳ N` badge and a turn-chip strip. | **Worker timeline.** Click a worker → every turn on its one warm thread. |
+| ![map](docs/map-dark.png) | ![worker timeline](docs/drawer.png) |
+| **Cockpit.** A live run paused at a `human()` gate — answer it right in the page. | **Light theme.** Toggle Dark/Light top-right; there's a dense **Tree** layout too ([below](#the-run-viewer)). |
+| ![cockpit](docs/cockpit.png) | ![light](docs/map-light.png) |
 
-This is the viewer you'll be looking at. The rest of this guide is how to *drive* it from Claude Code.
+The first thing you'll notice is what's *not* in the old one-shot model: **long-lived workers** (`⟳ 2 turns`), a **race** that cancelled its losers, and — live — an **answer card** the run is waiting on. The rest of this guide is how to *drive* all of that from Claude Code.
 
 ---
 
@@ -110,7 +115,8 @@ You don't manage flags; you describe what you want and Claude wires it up. Commo
 | **Cap the spend** | "keep it under ~5M tokens" | a hard `--budget` ceiling — tripping it isn't fatal, it prints a one-line `--resume` to continue |
 | **Keep it read-only (safety)** | "read-only — don't let agents write files" | runs every agent with `--sandbox read-only` — a **safety** choice (agents read but never write); good for audits, research, exploration. Not a way to spend less. |
 | **Let it edit files** | "let it apply the migration" | `--sandbox workspace-write` (the default) so agents can write |
-| **Resume after a stop** | "resume that run" | replays already-finished agents from the journal **free**, runs only the rest |
+| **Resume after a stop** | "resume that run" | replays already-finished agents from the journal **free**, runs only the rest; sessionful workers re-attach to their persisted threads **warm** |
+| **Be asked before risky steps** | "check with me before applying anything" | authors a `human()` gate — the live viewer shows an **answer card** (choices + free text) right in the run page; the run waits there, fleet warm, and falls back to a safe default on timeout |
 | **Pick a specific pattern** | "do a loop-until-dry bug hunt" · "fresh-context review with independent reviewers" | authors that exact pattern (see the [pattern library](references/authoring.md)) |
 
 One thing you *don't* tune: it's always **one frontier model for every agent** — no model-mixing. Thinking **effort** scales to the harness instead (a quick 2–5-agent run goes flat `--effort medium`; bigger runs use `--auto-effort`, so lone judge/synthesis gates think hardest). **To spend less**, lower the **budget**, drop the **effort**, narrow the **fan-out**, and **`--plan` first** to size it — never a smaller model. (Read-only is a **safety** choice — what agents may touch — not a cost lever.)
@@ -163,18 +169,70 @@ Rough intent is the default — a sentence or two is enough, and the skill compi
 
 ---
 
+## Real-world walkthroughs
+
+Each of these is **one rough sentence** to `/codex-workflows`. Claude compiles it into the harness described, runs it on Codex, and hands you the artifact — you watch it build the whole time. These are the shapes people actually reach for.
+
+### 1 · Diagnose a production incident (the bundled demo)
+
+> `/codex-workflows  Checkout p99 just spiked 12×. Triage the signals, race a few root-cause theories, confirm the leading one, and propose a fix — read-only, and ask me before you suggest shipping anything.`
+
+Claude authors a **root-cause lab**: a parallel **Triage** (metrics · logs · recent deploys), then a **Hunt** that *races three live workers* — one per hypothesis (N+1 query, pool exhaustion, cache stampede). The first to land wins; the runtime **cancels the other two** (you don't pay for the slowest). The winning worker is then **steered on its warm thread** — "confirm on the held repro" — a cheap second turn that doesn't re-read anything (141k tokens for the hunt → 47k for the confirmation). It **pauses at a `human()` gate** for the ship decision, then a lone `xhigh` synthesizer writes the patch + a regression test. The whole run is the hero image above; click the **n+1** worker for the per-turn timeline, and the live run shows the **answer card** (the cockpit screenshot). Bundled — open it with `node runner/bin/view-run.js examples/incident-demo --open`.
+
+### 2 · Audit a codebase for a class of bug — and trust the result
+
+> `/codex-workflows  Audit every route under src/ for missing authorization, read-only. Have an independent skeptic try to refute each finding before you report it.`
+
+The classic **find → adversarially-verify** shape, and the reason to use a fleet instead of one agent: one pass *finds* candidates in parallel (one agent per area), then a **second, independent agent tries to refute each** — defaulting to "not a real finding" unless it can prove exploitability with a `file:line`. Plausible-but-wrong findings die in verification instead of in your inbox. You get a deduped table of *confirmed* issues with evidence, and (because it's `--sandbox read-only`) nothing was ever written. Swap "authorization" for "missing input validation", "unhandled promise rejections", "N+1 queries", "PII in logs" — same harness.
+
+### 3 · Load a big thing once, then interrogate it cheaply
+
+> `/codex-workflows  Read everything under packages/core into one worker, then I'm going to ask it a stream of questions — keep it warm.`
+
+This is the **sessionful** superpower the native one-shot DSL can't do. One worker ingests the corpus **once** (`agent.start`); every follow-up is a `session.steer` on the *same warm thread* — it answers from context instead of re-reading. Measured on this repo's own source: after the one-time load, follow-ups cost **~69k tokens in ~6s each** versus **~219k and ~97s** for a cold agent re-reading every time — **~3× cheaper, ~16× faster per question** ([benchmark](examples/benchmarks)). Works for a data room, a contract set, a spec bundle, a log archive — anything you'll question more than twice.
+
+### 4 · Throw several strategies at one stubborn bug
+
+> `/codex-workflows  This flaky test fails ~1 in 20. Try three theories at once — a recent regression, a timing/ordering race, and a shared-state leak — and tell me whichever one cracks it first.`
+
+A **hedged race**: three workers attack the same problem from different angles in parallel; `agent.waitAny` wakes you on the **first** to reach a conclusion, and the losers are **cancelled** on the spot. You stop paying for the two dead ends the moment the live one pays off — the opposite of a `parallel()` barrier that waits for (and bills) the slowest. Reach for it whenever the *cheapest path to an answer is unknown* and trying several beats committing to one.
+
+### 5 · Let it do the work — but stop at the decisions only you should make
+
+> `/codex-workflows  Migrate every call of legacyFetch() to the new client and apply the edits — but show me the plan and check with me before you touch anything in payments/.`
+
+The **cockpit**. Claude authors a migration that discovers every call site, drafts the rewrites, and at the risky fork calls `human("apply to payments/ now, or open a PR?", {choices})`. With `--gui`, the run **pauses and an answer card appears right in the live viewer** (the cockpit screenshot) — the whole fleet stays *warm* while it waits for your click. Unattended (CI, overnight) it falls back to the safe default after a timeout instead of hanging, and your answer is journaled so a `--resume` never re-asks. Supervised autonomy: the agents do the labor, you keep the judgment calls.
+
+### 6 · The trust loop — harden the instruction before, verify the claims after
+
+> Before: `/codex-workflows quick Harden this Codex /goal before I run it: [paste]`  ·  After: `/codex-workflows Verify this PR description's claims against the actual diff and repo.`
+
+Two shipped harness-zoo templates that bracket any expensive run. **GoalLint** turns a vague, risky `/goal` into a precise, **falsifiable**, artifact-producing one — so you stop getting runs that end in "looks good" with no controls and no stopping criteria. **ClaimCheck** extracts every factual claim in a doc (README, PR, report, agent output), verifies each against repo artifacts, marks them *supported / unsupported / contradicted / plausible-unverified*, and emits a **proof ledger** with safer rewrites for the ones that don't hold. *Harden before agents run; verify the claims after they write.*
+
+### 7 · Cross-checked research with source discipline
+
+> `/codex-workflows  Research the current state of on-device LLM inference, verify every claim against a source, and cite the survivors — watch it live.`
+
+A research fan-out that's honest about what it knows: parallel searches gather candidate claims, an independent pass **verifies each against a real source** (and *reports gaps rather than fabricating* when the evidence isn't there), and a synthesizer writes the cited brief. Confirmed evidence, inference, and uncertainty stay separated — missing evidence is treated as uncertainty, not success.
+
+> **Sizing & cost.** Unsure how big a run will be? Add **"plan it first"** — a no-token dry run prints the agent count per phase and a budget estimate before you spend anything. Add **"keep it under ~5M tokens"** for a hard ceiling (tripping it is recoverable — it prints a free `--resume`). To spend less: lower the budget, drop the effort, narrow the fan-out — never a smaller model (it's always one frontier model for every agent).
+
+---
+
 ## The run viewer
 
 Whether Claude opens it (`--gui` / "open the viewer") or you generate it yourself, you get one **self-contained HTML file** — works offline, shareable, no server. Two layouts (toggle top-right), a **Dark / Light** theme, and per-agent **tokens, time, model, and effort** at agent, phase, and run level.
 
-- **◇ Map** — orchestrator → one row of parallel agents per phase → barrier merges → **result**. Each node carries its model / time / tokens; it opens at a readable 100% (**F** = fit the whole graph, `0` = reset, scroll zooms toward the cursor, drag pans). Wide fan-outs fold into an **aggregate node** you expand inline (running agents are never hidden); not-yet-started phases show a "pending" placeholder. Click any node — or the **result** node — for an **inspector that docks beside the graph** (the map stays visible) with the full structured result.
-- **☰ Tree** — a dense `Run → Phase → Agent` inspector: phase **progress bars** with inline per-agent time / tokens / model, and the run's actual **returned value** at the top.
+- **◇ Map** — orchestrator → one row of parallel agents per phase → barrier merges → **result**. Each node carries its model / time / tokens; it opens at a readable 100% (**F** = fit the whole graph, `0` = reset, scroll zooms toward the cursor, drag pans). Wide fan-outs fold into an **aggregate node** you expand inline (running agents and workers are never hidden); not-yet-started phases show a "pending" placeholder. Click any node — or the **result** node — for an **inspector that docks beside the graph** (the map stays visible) with the full structured result. A **sessionful worker** is a single node with a `⟳ N` turn-chip strip; open it and the inspector shows its **per-turn timeline** — every steer on the worker's one warm thread, in order, with each turn's own tokens and time (the worker-timeline screenshot above). Cancelled race losers are marked ⊘.
+- **☰ Tree** — a dense `Run → Phase → Agent / Worker` inspector: phase **progress bars** with inline per-agent time / tokens / model, workers expand to their nested turns, and the run's actual **returned value** sits at the top.
 
 ![Tree view](docs/tree.png)
 
 Results render generically (arrays-of-objects → tables, `palette` → swatches, `severity`/`effort` → badges, 1–10 → score pills, raw-JSON toggle), and it's fully **keyboard-navigable** (Tab / Enter / arrows / Esc) with `prefers-reduced-motion` support.
 
-**Live, in place — no reload.** With `--gui`/`--watch` the viewer is a live monitor that patches the DOM **without ever reloading**: running agents are amber with a ticking clock and **stream their partial output in the drawer**, finished agents flip to their result, and a status strip tracks wall-clock / last-update age / running count. Your view is never yanked — theme, layout, the open inspector, scroll, and zoom all survive every update; an inspector left open on a still-running agent fills in *in place* the moment its result lands. When the run finishes it settles into the static, shareable artifact. (It stays a single file: the live channel uses tiny sidecars pulled via a script tag, not `fetch`, so it updates live even opened as a `file://`.)
+**Live, in place — no reload.** With `--gui`/`--watch` the viewer is a live monitor that patches the DOM **without ever reloading**: running agents are amber with a ticking clock and **stream their partial output in the drawer**, finished agents flip to their result, and a status strip tracks wall-clock / last-update age / running count. Your view is never yanked — theme, layout, the open inspector, scroll, and zoom all survive every update; an inspector left open on a still-running agent (or a worker mid-steer) fills in *in place* the moment its result lands. When the run finishes it settles into the static, shareable artifact. (It stays a single file: the live channel uses tiny sidecars pulled via a script tag, not `fetch`, so it updates live even opened as a `file://`.)
+
+**The cockpit — answer a `human()` gate in the page.** When a workflow reaches a fork only you should decide, it pauses and a **"needs you" answer card** appears at the top of the live viewer — choice buttons plus a free-text box (the cockpit screenshot above) — and the run waits, fleet warm, for your click. With `--gui` the page is served on `127.0.0.1` so the card posts your answer straight back to the running workflow; opened as a bare `file://` it shows the one-line terminal command to answer instead. Unattended runs fall back to the gate's default after a timeout — it never hangs.
 
 Prefer the terminal? The same run renders as the **ASCII map** shown above — that's exactly what Claude pastes inline, and it has a live `--watch` too.
 
@@ -312,6 +370,8 @@ The native dynamic-workflows DSL gives you **one-shot** agents: `agent()` runs o
 
 The top row is the honest part: the shared DSL behaves exactly as documented; the rest is purely additive.
 
+**See it in the viewer.** The hero map's **Hunt** phase *is* this: three workers racing, the winner steered for a confirming second turn, the two losers cancelled (⊘). Click the `n+1` worker and the inspector shows its **per-turn timeline** (the worker-timeline screenshot above) — turn 0 the hunt, turn 1 the warm steer, billed separately (141k → 47k). And a run paused at a `human()` fork shows the **cockpit answer card** (the cockpit screenshot). All bundled: `node runner/bin/view-run.js examples/incident-demo --open`.
+
 ```js
 // race two approaches, act on whichever lands first, then keep questioning it — warm
 const a = await agent.start("Find the cause working backward from the symptom.", { sandbox: "read-only" });
@@ -327,10 +387,12 @@ for (const s of first.pendingSessions) await s.cancel();           // stop the l
 - **Race and cut losers** — fire several strategies at one problem, keep the first that works, cancel the rest.
 - **Follow the evidence** — a controller agent chases the strongest lead instead of a question list frozen at author time.
 
-**Runnable examples** (all `--plan`-safe — dry-run any with `--plan`, no Codex, no tokens):
-`sessionful-workers` (the intro) · `warm-context-interrogation` (load once, ask many) · `hedged-take-first-win` (race + cancel) · `flaky-bug-perturbation` (hold a repro, perturb it) · `lead-following-research` (controller chases leads) · `stateful-dialogue` (memory vs. a cold judge) · `agent-foreman` (supervised autonomy, escalate at forks).
+**Measured, not asserted** ([`examples/benchmarks/`](examples/benchmarks)): on this repo's own source (gpt-5.5, effort medium), a warm worker answered follow-up questions for **~69k tokens in ~6s each** after a one-time 329k ingest, while cold one-shots paid **~219k tokens and ~97s per question** re-reading the corpus every time — **~3× cheaper and ~16× faster per question**, breaking even on cumulative tokens by the third question (the per-question wall-clock gap is decisive from the first).
 
-> **v1 scope (honest):** one-shot `agent()` is resumable as always; **sessions are live-only** — a `--resume` re-runs them, and a worker that needs a human returns a structured `needs_human` checkpoint rather than blocking on live input (live "interactive" steering is future). Full API, the controller pattern, and the `hands_off` / `checkpointed` / `interactive` involvement modes → [`references/authoring.md`](references/authoring.md#sessionful-workers-long-lived-steerable).
+**Runnable examples** (all `--plan`-safe — dry-run any with `--plan`, no Codex, no tokens):
+`sessionful-workers` (the intro) · `warm-context-interrogation` (load once, ask many) · `hedged-take-first-win` (race + cancel) · `flaky-bug-perturbation` (hold a repro, perturb it) · `lead-following-research` (controller chases leads) · `stateful-dialogue` (memory vs. a cold judge) · `agent-foreman` (supervised autonomy, escalate at forks) · `human-gate` (pause at a declared fork, answer in the live viewer, steer the warm worker).
+
+> **Resume (honest):** one-shot `agent()` is resumable as always. Sessions resume **warm**: a `--resume` re-attaches each worker to its persisted Codex thread (`thread/resume`), replays the already-completed turns free from the journal, and runs only the new steers — on the worker's full prior context. If a thread can't be re-attached (rollout deleted, older codex), that worker honestly re-runs live. And when a workflow hits a fork only a human should decide, `human(question, {choices, default})` pauses **right there**: with `--gui` an answer card appears in the live viewer (the fleet stays warm while you click), unattended runs fall back to the default after a timeout, and the answer is journaled so a `--resume` never re-asks. Full API, the controller pattern, and the `hands_off` / `checkpointed` / `interactive` involvement modes → [`references/authoring.md`](references/authoring.md#sessionful-workers-long-lived-steerable).
 
 ---
 
@@ -344,7 +406,12 @@ node runner/bin/run-workflow.js examples/review.workflow.js --frontier --auto-ef
   --sandbox read-only --args '{"files":["src/auth.ts"],"focus":"missing auth checks"}'
 # progress streams on stderr; the workflow's return value prints as JSON on stdout
 
-# Watch it live (browser, terminal, or both):
+# The flagship sessionful demo (race + steer + a human() cockpit gate), watched live:
+node runner/bin/run-workflow.js examples/incident-demo/checkout-incident.workflow.js \
+  --frontier --auto-effort --sandbox read-only --gui
+# an answer card appears in the browser when it reaches the ship decision
+
+# Watch any run live (browser, terminal, or both):
 node runner/bin/run-workflow.js examples/market-news.workflow.js --frontier --auto-effort --gui
 
 # Turn any past run into the viewer (HTML, or a terminal ASCII map):
@@ -362,33 +429,37 @@ Key flags: `--frontier` (pin the latest frontier model), `--auto-effort` (scale 
 `run-workflow` prints a one-line recap when a run finishes (`--summary` for the full report; `--no-summary` to silence it). To distill any past run yourself — what it cost, where the time went, and whether anything looks off — point `summarize-run` at the journal:
 
 ```text
-$ node runner/bin/summarize-run.js examples/demo
+$ node runner/bin/summarize-run.js examples/incident-demo
 
-  Run summary · nimbus-landing-redesign
-  Audit a fictional SaaS landing page and propose ranked, commercially-ap…
+  Run summary · checkout-incident
+  Diagnose a checkout p99 latency regression: triage, race hypotheses, co…
 
-  Agents      8 completed
-  Phases      4
-  Tokens      2.1M   (2,150,000)
-  Agent-time  19m58s   (Σ per-agent durations, not wall-clock)
+  Agents      8 recorded · 6 ok · 2 cancelled
+  Workers     3 sessionful (4 turns, 1 steer)
+  Phases      3
+  Tokens      774k   (774,000)
+  Agent-time  8m22s   (Σ per-agent durations, not wall-clock)
 
 ── By phase ──────────────────────────────────────────────────────────────
   PHASE            AGENTS    TOKENS  AGENT-TIME
-  Audit                 2      350k       3m05s
-  Concept               3      765k       7m14s
-  Judge                 2      623k       5m46s
-  Synthesize            1      412k       3m53s
+  Triage                3      348k       3m32s
+  Hunt                  4      218k       2m41s
+  Fix                   1      208k       2m09s
 
-── Costliest agents (by tokens) ──────────────────────────────────────────
-    1.    412k  synthesize                   Synthesize     gpt-5.5
-    2.    319k  judge:growth                 Judge          gpt-5.4
-    3.    304k  judge:designer               Judge          gpt-5.4
+── Sessionful workers ─────────────────────────────────────────────────────
+  WORKER            PHASE          TURNS   TOKENS     TIME  STATUS
+  hunt:n+1          Hunt               2     188k    1m55s  completed
+  hunt:pool         Hunt               1      16k      24s  cancelled
+  hunt:cache        Hunt               1      14k      22s  cancelled
+
+── Costliest agents (by tokens) ───────────────────────────────────────────
+    1.    208k  fix:patch                    Fix            gpt-5.5
+    2.    141k  hunt:n+1 · t0                Hunt           gpt-5.5
+    3.    134k  triage:logs                  Triage         gpt-5.5
     …                                       (up to the top 10; slowest-by-time too)
-
-── Effort ────────────────────────────────────────────────────────────────
-  medium                4 agents   973k tok
-  high                  4 agents   1.2M tok
 ```
+
+The race shows up honestly: the two cancelled workers are counted as `cancelled` (not failures), the winner's two turns are billed as `hunt:n+1 · t0` / `· t1`, and the warm steer (`t1`, 47k) is visibly cheaper than the cold hunt (`t0`, 141k).
 
 It reads the journal plus any sidecars: the **event stream** adds true wall-clock per phase, **cache hit rate** on a resumed run, and detection of **interrupted** agents (started, never finished); the **meta** sidecar adds **budget usage**. It also flags risks — missing metrics, many null results, an un-staged huge fan-out, agents left on the expensive default effort. It's read-only (never touches the journal), handles old journals that predate the metric fields, and emits `--json` (structured) or `--markdown` (paste-ready) as well as text.
 
@@ -419,7 +490,8 @@ Claude Code's workflow runtime is sealed inside its binary, so this is an **exte
 | :--- | :--- |
 | `agent(prompt)` → final text | `thread/start` + `turn/start`, last `agentMessage.text` |
 | `agent(prompt, { schema })` | native `turn/start.outputSchema` (auto-normalized for strict mode) → parsed JSON |
-| `agent.start(prompt)` → session | `thread/start` + first `turn/start`, returns before completion (live-only) |
+| `agent.start(prompt)` → session | `thread/start` + first `turn/start`, returns before completion |
+| session resume (`--resume`) | `thread/resume` re-attaches the persisted thread; completed turns replay from the journal |
 | `session.steer(msg)` | another `turn/start` on the **same** thread — a follow-up turn |
 | `agentType: 'x'` | loads `.claude/agents/x.md` → `developerInstructions` |
 | Claude model id / alias | remapped to an available Codex model via `model/list` |
@@ -445,8 +517,8 @@ Workflow agents run with `approvalPolicy: "never"` inside a Codex sandbox (defau
 ## Limitations (honest)
 
 - This is a **standalone re-host**, not the in-Claude-Code-native experience: no in-session background tasks, no `/workflows` progress UI, no save-as-`/command` — though the live viewer and inline map cover monitoring, and `workflow("name")` resolves saved workflows from `.claude/workflows/`.
-- A couple of native nuances aren't replicated 1:1: **warm-context resume** (the journal replays *results*, not Codex thread state via `thread/fork`), and budget accounting is per-process (`--budget-meter` selects total vs the native output-token pool). The map models barrier/phase structure (a clean approximation for pipeline-shaped runs). Details in the internals doc.
-- **Sessionful workers are live-only.** `agent.start()` workers run within a process but are **not** resumable across one (a `--resume` re-runs them); one-shot `agent()` resume is unchanged. The `interactive` involvement mode (live human steering of running workers) is documented but not built — v1 escalates to the human via a structured `needs_human` return (`hands_off` / `checkpointed`).
+- A couple of native nuances aren't replicated 1:1: one-shot `agent()` resume replays *results* (the journal), not thread state — single stateless turns have no state worth forking — and budget accounting is per-process (`--budget-meter` selects total vs the native output-token pool). The map models barrier/phase structure (a clean approximation for pipeline-shaped runs). Details in the internals doc.
+- **Session resume depends on the persisted rollout.** A `--resume` re-attaches each worker to its prior Codex thread (`thread/resume`) and replays completed turns free; if the rollout is gone or the codex version predates `thread/resume`, that worker's turns re-run live (correct, just not free). Turn replay is positional — edit the script's session *call order* and the replayed prefix re-runs.
 
 ## Development
 
@@ -473,15 +545,19 @@ runner/                   standalone runner (Node, zero deps)
   src/runModel.js         shared run-model assembly (HTML + ASCII viewers)
   src/asciiMap.js         ASCII map renderer
   src/runSummary.js       run-summary computation + text/markdown renderers
-  test/                   offline + view-run + view-run.live + map-run + summarize-run +
-                          goal-lint.plan + handshake
+  test/                   offline + codex-session + view-run + view-run.live + map-run +
+                          summarize-run + serve + goal-lint.plan + claim-check.plan + handshake
 references/               authoring.md (DSL + patterns) · runner-readme.md (internals)
 examples/                 one-shot: hello · review · bug-hunt · review-gates ·
                           deep-research · market-news · tournament-sort · triage · classify-route
   sessionful workers      sessionful-workers · warm-context-interrogation · flaky-bug-perturbation ·
-   (agent.start/steer)    hedged-take-first-win · lead-following-research · stateful-dialogue · agent-foreman
-  demo/                   bundled sample run for the viewer
+   (agent.start/steer)    hedged-take-first-win · lead-following-research · stateful-dialogue ·
+                          agent-foreman · human-gate (answer a declared fork live in the viewer)
+  incident-demo/          the flagship bundled run (npm run demo): triage → race workers → fix gate
+  demo/                   a second sample run (a 4-phase landing-page review)
+  benchmarks/             warm-vs-cold — measured: warm steers vs cold re-reads (numbers in its README)
   harness-zoo/goal-lint/  GoalLint — harden a vague /goal into a precise, testable one
+  harness-zoo/claim-check/ ClaimCheck — verify a doc's claims against the repo (the trust loop's "after")
 docs/                     screenshots
 ```
 

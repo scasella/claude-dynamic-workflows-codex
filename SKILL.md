@@ -199,7 +199,7 @@ productization · goal hardening · run summarization · harness design.**
 | Archetype | When to use |
 |-----------|-------------|
 | `goal_lint` ✓ | harden a vague Codex/Claude `/goal` before an expensive agent run |
-| `claim_check` / `proofpack` | verify claims in a post / README / report / memo / result / agent output against repo artifacts or sources |
+| `claim_check` / `proofpack` ✓ | verify claims in a post / README / report / memo / result / agent output against repo artifacts or sources |
 | `research_result_triage` | decide whether an experiment / benchmark / result is real, overfit, useful, or worth continuing |
 | `next_experiment_designer` | design concrete next experiments, falsification gates, and Codex `/goal`s |
 | `eureka_forge` | surprising, high-upside ideas: diverse personas, forced recombination, hidden mechanisms, falsification |
@@ -216,6 +216,7 @@ productization · goal hardening · run summarization · harness design.**
 | `harness_forge` | design the best workflow/harness for a rough task rather than solving it directly |
 
 ✓ = a concrete template ships today: `goal_lint` → `examples/harness-zoo/goal-lint/`,
+`claim_check` → `examples/harness-zoo/claim-check/` (the trust loop's "after"),
 `run_summary` → `summarize-run.js` (see *Summarize a run*). The rest are **shapes to
 author** from the patterns below, not prebuilt files. Note that `harness_forge` and
 the `goal_contract_compiler` pattern are the skill's **own** meta-operations — the
@@ -268,8 +269,8 @@ only when the job genuinely needs a worker to *keep its context across turns*:
 - the work is **one-shot** (a finding, a judgment, a synthesis);
 - **independent fresh-context review** is the point (review gates, adversarial verify
   — a steered worker carries bias forward);
-- **resume caching matters** more than continuity (sessions are live-only: a
-  `--resume` re-runs them);
+- the work is a **pure cacheable artifact** (sessions resume warm via
+  `thread/resume`, but one-shot replay never depends on a persisted rollout);
 - no follow-up steering is expected.
 
 **Compile, don't babysit.** When you author a sessionful workflow, the human sets
@@ -280,7 +281,11 @@ mode and default to **`checkpointed`**:
 - `hands_off` — never pause; safe defaults, mark uncertainty, avoid risky/destructive
   actions.
 - `checkpointed` *(default)* — pause only at plan / write / budget / scope gates.
-- `interactive` — live steering (future; don't author for it).
+- `interactive` — pause at declared forks via the `human(question, { id, choices,
+  default, timeoutMs })` global: with `--gui` the live viewer shows an answer card;
+  with `--tui`/`--interactive` the human appends to `<journal>.answers.jsonl`. It
+  resolves from `args.checkpointAnswers` / the journal (`--resume` never re-asks)
+  before the live channel, and falls back to `default` on timeout — never hangs.
 
 Never make the workflow block on live human input. When a decision truly needs a
 human (scope, cost, risk, destructive action, value judgment), **return** a
@@ -494,6 +499,10 @@ Globals:
 - `pipeline(items, ...stages)` → per-item staging, no barrier; a stage that
   throws drops that item to `null`. Stages get `(prev, originalItem, index)`.
 - `phase(title)` / `log(msg)` → progress (stderr).
+- `human(question, { id, choices, default, timeoutMs })` → a **declared human
+  fork**: resolves from `args.checkpointAnswers` / the journal first, then the live
+  channel (`--gui` answer card or the answers sidecar), else the default on timeout
+  — never hangs unattended. Journaled (`--resume` never re-asks); not an agent.
 - `args` → the value passed via `--args` / `--args-file`.
 - `budget` → `{ total, spent(), remaining() }` (token accounting).
 - `workflow(ref, args?)` → run another script inline (one level). `ref` is a
@@ -502,8 +511,9 @@ Globals:
 - `agent.start(prompt, opts?)` → an **`AgentSession`** (long-lived worker; returns
   before the turn finishes). `agent.waitAny(sessions, opts?)` → the first actionable
   one. `session.steer(msg, {wait})` runs a follow-up turn **on the same thread**;
-  `session.wait/poll/cancel/close`. Sessionful = **live-only / non-resumable**; use it
-  only for steerable/iterative work (see *4b · One-shot vs sessionful workers*).
+  `session.wait/poll/cancel/close`. Sessions resume **warm** on `--resume`
+  (`thread/resume` re-attaches the persisted thread; completed turns replay free); use
+  sessions for steerable/iterative work (see *4b · One-shot vs sessionful workers*).
 
 Key `agent()` opts: `schema` (JSON Schema → Codex `outputSchema`, result parsed),
 `model` (Claude ids/aliases auto-map to a Codex model), `agentType` (loads
