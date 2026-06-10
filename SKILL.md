@@ -193,9 +193,16 @@ each bets on, per-run budgets) before launching. Two axes, freely mixed:
   One script per variant.
 
 Split the user's overall budget across variants (status shows each run's
-spend against its ceiling). Apply the *Anti-overbuild rule* to the fleet too:
-2 well-differentiated variants beat 4 redundant ones — every variant must bet
-on something the others don't.
+spend against its ceiling). **Size read-heavy fan-outs realistically:** an
+agent whose job is *reading a repo/corpus* costs **~400–600k tokens
+regardless of its effort tier** — the input dominates, so `--effort low`
+does not make a sweep cheap, and `--plan`'s per-effort estimate undercounts
+it (measured: four "low" sweeps = 2.1M, 525k each, vs a 150k/agent plan
+estimate). Budget ≈ `readers × 500k + non-readers × the plan estimate`,
+with headroom. A tripped ceiling is recoverable (`--resume` replays the
+prefix free) but costs a supervision round-trip. Apply the *Anti-overbuild
+rule* to the fleet too: 2 well-differentiated variants beat 4 redundant ones
+— every variant must bet on something the others don't.
 
 ### 2 · Author for supervision
 
@@ -678,6 +685,9 @@ run-workflow <script.js>
   of thumb: medium-effort frontier (`gpt-5.5`) spends **~0.3–0.5M tokens/agent**
   (reasoning included), so an N-agent run wants `--budget ≈ N × 500k` with
   headroom. (A 35-agent run blew past an 8M ceiling after only ~17 agents.)
+  **Read-heavy agents break the per-effort estimate**: an agent that reads a
+  repo/corpus costs ~400–600k *even at `--effort low`* (input dominates) — cost
+  those at ~500k each no matter the effort tier.
   Tripping it isn't fatal — the CLI prints a ready-to-paste `--resume` command
   with a higher ceiling, and the cached agents replay at 0 tokens.
 - **Effort (important)** — prefer **`--auto-effort`**, which sets each agent's

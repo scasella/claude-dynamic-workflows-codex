@@ -163,7 +163,9 @@ function printPlan(recs) {
   console.error(
     "  ⚠ dynamic fan-outs over agent OUTPUT are not counted (arrays come back empty\n" +
       "    in a dry run), so this is a LOWER BOUND. Re-run --plan on a small --args\n" +
-      "    slice for a tighter number, or size --budget up.",
+      "    slice for a tighter number, or size --budget up.\n" +
+      "  ⚠ read-heavy agents (repo/corpus readers) cost ~400–600k REGARDLESS of effort\n" +
+      "    tier — input dominates. Cost those at ~500k each, not the per-effort figure.",
   );
 }
 

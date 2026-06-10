@@ -20,12 +20,18 @@ RUNNER=../../runner
 node $RUNNER/bin/run-workflow.js hunt-deep.workflow.js \
   --frontier --auto-effort --interactive --budget 1200000 1>deep.result.json 2>deep.log &
 node $RUNNER/bin/run-workflow.js hunt-wide.workflow.js \
-  --frontier --auto-effort --interactive --budget 1500000 1>wide.result.json 2>wide.log &
+  --frontier --auto-effort --interactive --budget 3500000 1>wide.result.json 2>wide.log &
 ```
 
 Each gets its own journal under `.workflow-journal/` (distinct scripts →
 distinct journals; same-script variants would add `--run-id <name>`). Pass
 `--args '{"goal":"…"}'` to point both at your actual symptom.
+
+> **Budget sizing:** agents that *read a repo or corpus* cost **~500k tokens
+> each regardless of effort tier** (input dominates — measured: 4 low-effort
+> sweeps = 2.1M). Size read-heavy fan-outs by that, not `--plan`'s per-effort
+> estimate. Tripping a ceiling is recoverable — `--resume` replays completed
+> agents *and journaled gate answers* free — but costs a supervision round-trip.
 
 ## 2 · Supervise
 

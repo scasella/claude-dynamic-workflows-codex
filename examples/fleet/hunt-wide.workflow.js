@@ -4,7 +4,10 @@
 // wins. Run both; let the supervisor compare.
 //
 //   node runner/bin/run-workflow.js examples/fleet/hunt-wide.workflow.js \
-//     --frontier --auto-effort --interactive --budget 1500000
+//     --frontier --auto-effort --interactive --budget 3500000
+// (Budget note: the 4 sweep agents READ the repo, which costs ~500k each
+// regardless of effort tier — size read-heavy fan-outs by that, not --plan's
+// per-effort estimate. Measured live: 4 low-effort sweeps = 2.1M.)
 
 export const meta = {
   name: 'fleet-hunt-wide',
