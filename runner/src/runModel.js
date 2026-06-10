@@ -7,13 +7,14 @@ import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 
 // List a run directory's journals, newest first by mtime, excluding the
-// *.events.jsonl lifecycle sidecar. locateRun uses this to default to the most
-// recent run; the CLIs' --list surfaces the choices when a dir has several.
+// *.events.jsonl and *.answers.jsonl sidecars (both are .jsonl but not runs).
+// locateRun uses this to default to the most recent run; the CLIs' --list
+// surfaces the choices when a dir has several.
 export function listJournals(runDir) {
   const jdir = join(runDir, ".workflow-journal");
   if (!existsSync(jdir)) return [];
   let names;
-  try { names = readdirSync(jdir).filter((f) => f.endsWith(".jsonl") && !f.endsWith(".events.jsonl")); } catch { return []; }
+  try { names = readdirSync(jdir).filter((f) => f.endsWith(".jsonl") && !f.endsWith(".events.jsonl") && !f.endsWith(".answers.jsonl")); } catch { return []; }
   const out = names.map((name) => {
     const path = join(jdir, name);
     let mtimeMs = 0, size = 0;

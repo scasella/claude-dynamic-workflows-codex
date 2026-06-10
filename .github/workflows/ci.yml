@@ -18,6 +18,8 @@ jobs:
       # live update channel, and the ASCII map renderer — all in a fake DOM.
       - name: Offline unit checks
         run: node runner/test/offline.js
+      - name: Session driver (chaos + warm resume)
+        run: node runner/test/codex-session.test.js
       - name: Run-viewer robustness (all shapes)
         run: node runner/test/view-run.test.js
       - name: Run-viewer live updates (no-reload sidecar channel)
@@ -28,3 +30,9 @@ jobs:
         run: node runner/test/summarize-run.test.js
       - name: GoalLint template (plan-mode smoke)
         run: node runner/test/goal-lint.plan.test.js
+      - name: ClaimCheck template (plan-mode smoke)
+        run: node runner/test/claim-check.plan.test.js
+      - name: Interactive cockpit channel (serve)
+        run: node runner/test/serve.test.js
+      - name: Fleet supervision (status / answer / supervisor loop)
+        run: node runner/test/fleet.test.js

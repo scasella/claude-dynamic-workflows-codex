@@ -41,6 +41,7 @@ function parseArgs(argv) {
     interactive: false,
     retries: null,
     journal: undefined,
+    runId: null,
     resume: false,
     noJournal: false,
     fresh: false,
@@ -69,6 +70,7 @@ function parseArgs(argv) {
     else if (a === "--interactive") out.interactive = true;
     else if (a === "--retries") out.retries = Number(rest[++i]);
     else if (a === "--journal") out.journal = rest[++i];
+    else if (a === "--run-id") out.runId = rest[++i];
     else if (a === "--resume") out.resume = true;
     else if (a === "--no-journal") out.noJournal = true;
     else if (a === "--fresh") out.fresh = true;
@@ -88,7 +90,7 @@ if (opts.help || !opts.script) {
       "  [--budget N] [--budget-meter total|output] [--model M] [--frontier | --pin-model M]\n" +
       "  [--effort none|minimal|low|medium|high|xhigh] [--auto-effort | --pin-effort E]\n" +
       "  [--sandbox read-only|workspace-write|danger-full-access] [--retries N]\n" +
-      "  [--plan] [--tui] [--gui] [--resume] [--journal PATH] [--fresh] [--no-journal]\n" +
+      "  [--plan] [--tui] [--gui] [--resume] [--journal PATH] [--run-id NAME] [--fresh] [--no-journal]\n" +
       "  [--summary | --no-summary]\n" +
       "\n" +
       "  --tui            open a live ASCII map of the run in a new terminal window\n" +
@@ -96,8 +98,10 @@ if (opts.help || !opts.script) {
       "                   localhost so the workflow's human() questions are answerable\n" +
       "                   in the page (--monitor opens both)\n" +
       "  --interactive    enable the human() answer channel without a monitor —\n" +
-      "                   answer from another terminal by appending to the\n" +
-      "                   <journal>.answers.jsonl sidecar\n" +
+      "                   answer from another terminal (or a supervising agent) via\n" +
+      "                   `fleet.js answer`, or by appending to <journal>.answers.jsonl\n" +
+      "  --run-id NAME    suffix the default journal/sidecar paths with NAME so\n" +
+      "                   concurrent runs of the same script don't collide (fleets)\n" +
       "  --frontier       pin ALL agents to the latest frontier model (auto-detected),\n" +
       "                   overriding any per-call model in the script\n" +
       "  --pin-model M    pin ALL agents to model M, overriding any per-call model\n" +
@@ -281,13 +285,21 @@ let onProgress;
 let progressTimer = null;
 let journalPath = null;
 if (!opts.noJournal) {
+  // --run-id suffixes the default journal name so N concurrent runs of the SAME
+  // script (a fleet of variants over different --args) get disjoint journals and
+  // sidecars instead of clobbering each other. An explicit --journal still wins.
+  const runSuffix = opts.runId ? `--${String(opts.runId).replace(/[^\w.-]+/g, "_")}` : "";
   journalPath =
-    opts.journal ?? `.workflow-journal/${basename(opts.script).replace(/\.[cm]?js$/, "")}.jsonl`;
+    opts.journal ?? `.workflow-journal/${basename(opts.script).replace(/\.[cm]?js$/, "")}${runSuffix}.jsonl`;
   // The sidecars (events/meta/progress/questions) are written below with silent
   // best-effort guards — make sure the journal dir exists FIRST, or on a fresh
   // project they all no-op until the first journal record creates it.
   try { mkdirSync(dirname(resolve(journalPath)), { recursive: true }); } catch {}
   if (opts.fresh) await rm(journalPath, { force: true });
+  // Touch the journal eagerly (it's otherwise created on the first completed
+  // agent) so a just-launched run is immediately discoverable — `fleet status`
+  // and the viewers list runs by their journal files.
+  try { if (!existsSync(journalPath)) writeFileSync(journalPath, ""); } catch {}
   journal = new Journal(journalPath, { reuse: opts.resume });
   await journal.load();
   console.error(
@@ -300,7 +312,9 @@ if (!opts.noJournal) {
   try { writeFileSync(eventsPath, ""); } catch {}
 
   // Run-meta sidecar: the budget ceiling + effort/model policy the journal can't
-  // carry, so a post-hoc `summarize-run` can report budget usage. Best-effort.
+  // carry, so a post-hoc `summarize-run` can report budget usage — plus the live
+  // process identity (pid/startedAt/script/runId) that `fleet status` needs to
+  // tell a running run from a finished or killed one. Best-effort.
   try {
     writeFileSync(runMetaPathFor(journalPath), JSON.stringify({
       budget: opts.budget ?? null,
@@ -309,6 +323,11 @@ if (!opts.noJournal) {
       autoEffort: opts.autoEffort,
       pinEffort: pinnedEffort,
       sandbox: opts.sandbox ?? null,
+      pid: process.pid,
+      startedAt: Date.now(),
+      script: resolve(opts.script),
+      runId: opts.runId ?? null,
+      interactive: opts.interactive || opts.gui || opts.tui,
     }));
   } catch {}
 
