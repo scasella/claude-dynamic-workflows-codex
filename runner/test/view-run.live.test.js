@@ -12,10 +12,10 @@
 //
 //   node test/view-run.live.test.js
 
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const VIEW = new URL("../bin/view-run.js", import.meta.url).pathname;
 const ROOT = mkdtempSync(join(tmpdir(), "wf-livetest-"));
@@ -112,9 +112,18 @@ const baseGen = JSON.parse(DATA).gen || 0;
 // ---- watch render writes the live flag + the sidecar update channel ----
 {
   const watchOut = join(ROOT, "watch.html");
-  try {
-    execFileSync("node", [VIEW, dir, "--out", watchOut, "--watch"], { stdio: ["ignore", "ignore", "ignore"], timeout: 1500, killSignal: "SIGKILL" });
-  } catch (e) { /* expected: the watcher is killed by the timeout after writing */ }
+  // Spawn the watcher and kill it the MOMENT its three artifacts exist — this
+  // used to be a guaranteed 1.5s timeout-kill on every run (the single biggest
+  // fixed wait in the suite); the 10s deadline below is a failure ceiling, not
+  // a wait that successful runs pay.
+  const watcher = spawn("node", [VIEW, dir, "--out", watchOut, "--watch"], { stdio: "ignore" });
+  const artifacts = [watchOut, join(ROOT, "watch.gen.js"), join(ROOT, "watch.data.js")];
+  const written = (p) => { try { return statSync(p).size > 0; } catch { return false; } };
+  const deadline = Date.now() + 10_000;
+  while (!artifacts.every(written) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  watcher.kill("SIGKILL");
   const html = readFileSync(watchOut, "utf8");
   ok("watch render flags data-live=\"1\"", /<html lang="en" data-live="1">/.test(html));
   ok("watch render carries no <meta refresh>", !/http-equiv="refresh"/.test(html));
